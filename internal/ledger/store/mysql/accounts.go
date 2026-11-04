@@ -225,9 +225,9 @@ func expectOne(result sql.Result) error {
 
 var ErrConflict = errors.New("conflict")
 
-func (s *Store) EnsureDefaults(ctx context.Context, ownerID uuid.UUID, now time.Time) error {
+func (s *Store) EnsureDefaults(ctx context.Context, q queryer, ownerID uuid.UUID, now time.Time) error {
 	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM categories WHERE owner_id = ?`, db.UUIDBytes(ownerID)).Scan(&count); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM categories WHERE owner_id = ?`, db.UUIDBytes(ownerID)).Scan(&count); err != nil {
 		return err
 	}
 	if count == 0 {
@@ -245,12 +245,12 @@ func (s *Store) EnsureDefaults(ctx context.Context, ownerID uuid.UUID, now time.
 				ID: id.New(), OwnerID: ownerID, Name: item.name, Kind: item.kind,
 				SortOrder: item.order, Version: 1, CreatedAt: now, UpdatedAt: now,
 			}
-			if err := s.CreateCategory(ctx, s.db, category); err != nil {
+			if err := s.CreateCategory(ctx, q, category); err != nil {
 				return fmt.Errorf("create default category: %w", err)
 			}
 		}
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts WHERE owner_id = ?`, db.UUIDBytes(ownerID)).Scan(&count); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts WHERE owner_id = ?`, db.UUIDBytes(ownerID)).Scan(&count); err != nil {
 		return err
 	}
 	if count == 0 {
@@ -263,7 +263,7 @@ func (s *Store) EnsureDefaults(ctx context.Context, ownerID uuid.UUID, now time.
 				ID: id.New(), OwnerID: ownerID, Name: item.name, Kind: item.kind,
 				Version: 1, CreatedAt: now, UpdatedAt: now,
 			}
-			if err := s.CreateAccount(ctx, s.db, account); err != nil {
+			if err := s.CreateAccount(ctx, q, account); err != nil {
 				return fmt.Errorf("create default account: %w", err)
 			}
 		}

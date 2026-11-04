@@ -52,6 +52,14 @@ func (s *Server) Handler() http.Handler {
 			httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false})
 			return
 		}
+		var version int64
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(version_id), 0) FROM goose_db_version WHERE is_applied = 1`,
+		).Scan(&version); err != nil || version == 0 {
+			s.logger.Warn("readiness_migration_check_failed", "error", err, "version", version)
+			httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false})
+			return
+		}
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 

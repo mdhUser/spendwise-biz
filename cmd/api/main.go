@@ -45,10 +45,10 @@ func main() {
 	ledgerStore := ledgermysql.New(database)
 	ledgerService := ledgerapp.New(database, ledgerStore, cfg)
 
-	identityHandler := identityhttp.New(identityService)
-	identityHandler.SetDefaults(func(ctx context.Context, userID uuid.UUID) error {
-		return ledgerService.EnsureDefaults(ctx, userID)
+	identityService.SetDefaults(func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
+		return ledgerService.EnsureDefaultsTx(ctx, tx, userID)
 	})
+	identityHandler := identityhttp.New(identityService)
 	identityHandler.SetPurge(func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
 		return ledgerService.PurgeUser(ctx, tx, userID)
 	})
@@ -69,11 +69,15 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-stop
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = server.Shutdown(ctx)
+		if err := server.Shutdown(ctx); err != nil {
+			logger.Error("server_shutdown", "error", err)
+		}
 	}()
 
 	logger.Info("server_started", "addr", cfg.HTTPAddr)
@@ -81,4 +85,8 @@ func main() {
 		logger.Error("server_error", "error", err)
 		os.Exit(1)
 	}
+	// Shutdown closes the listener first, so ListenAndServe returns before
+	// in-flight handlers finish. Wait for Shutdown to drain them before the
+	// deferred database.Close runs.
+	<-shutdownDone
 }

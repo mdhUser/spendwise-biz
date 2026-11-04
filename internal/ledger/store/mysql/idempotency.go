@@ -96,6 +96,9 @@ type AuditEvent struct {
 }
 
 func (s *Store) InsertAudit(ctx context.Context, q queryer, event AuditEvent) error {
+	if len(event.RequestID) > 64 {
+		event.RequestID = event.RequestID[:64]
+	}
 	var before, after []byte
 	var err error
 	if event.Before != nil {
@@ -148,7 +151,24 @@ func (s *Store) PurgeUser(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID) er
 	return nil
 }
 
-func (s *Store) DeleteExpiredIdempotency(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM idempotency_records WHERE expires_at < UTC_TIMESTAMP(3)`)
-	return err
+// DeleteExpiredIdempotency removes records whose retention window has ended.
+// It deletes in bounded batches to keep locks short when a backlog exists.
+func (s *Store) DeleteExpiredIdempotency(ctx context.Context, now time.Time) (int64, error) {
+	const batchSize = 1000
+	var total int64
+	for {
+		result, err := s.db.ExecContext(ctx,
+			`DELETE FROM idempotency_records WHERE expires_at < ? LIMIT ?`, now.UTC(), batchSize)
+		if err != nil {
+			return total, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += affected
+		if affected < batchSize {
+			return total, nil
+		}
+	}
 }

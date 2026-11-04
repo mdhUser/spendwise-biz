@@ -80,7 +80,6 @@ func (s *Service) GetGoal(ctx context.Context, ownerID, goalID uuid.UUID) (any, 
 	if err != nil {
 		return nil, err
 	}
-	goal.Version++
 	return s.goalView(goal, terms), nil
 }
 
@@ -105,6 +104,9 @@ func (s *Service) CreateGoal(ctx context.Context, ownerID, actorID uuid.UUID, re
 		}
 		if parsed.Before(start) {
 			return nil, false, apperr.Validation("endPeriod 不能早于 startPeriod")
+		}
+		if len(domain.PeriodsBetween(start, parsed)) > 60 {
+			return nil, false, apperr.Validation("目标结束期间不能超过 60 个月")
 		}
 		end = &parsed
 	}
@@ -138,12 +140,17 @@ func (s *Service) CreateGoal(ctx context.Context, ownerID, actorID uuid.UUID, re
 			return nil, nil, err
 		}
 		if err := s.store.InsertTerm(ctx, tx, term, categoryIDs); err != nil {
+			if db.IsDuplicate(err) {
+				return nil, nil, apperr.Conflict("CONFLICT", "该生效期间已有条款")
+			}
 			return nil, nil, err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "saving_goal", EntityID: goal.ID, Action: "create",
 			ActorID: actorID, RequestID: requestID, After: s.goalView(goal, []domain.GoalTerm{*term}),
-		})
+		}); err != nil {
+			return nil, nil, err
+		}
 		return s.goalView(goal, []domain.GoalTerm{*term}), &goal.ID, nil
 	})
 	return body, replay, err
@@ -182,6 +189,9 @@ func (s *Service) UpdateGoal(ctx context.Context, ownerID, actorID, goalID uuid.
 			if len(terms) > 0 && end.Before(terms[len(terms)-1].EffectiveFromPeriod) {
 				return nil, apperr.Validation("endPeriod 不能早于最后一条条款")
 			}
+			if len(domain.PeriodsBetween(goal.StartPeriod, end)) > 60 {
+				return nil, apperr.Validation("目标结束期间不能超过 60 个月")
+			}
 			goal.EndPeriod = &end
 		}
 	}
@@ -205,11 +215,13 @@ func (s *Service) UpdateGoal(ctx context.Context, ownerID, actorID, goalID uuid.
 			}
 			return err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "saving_goal", EntityID: goal.ID, Action: "update",
 			ActorID: actorID, RequestID: requestID, Before: before,
 			After: s.goalView(goal, terms),
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -266,26 +278,23 @@ func (s *Service) AddTerm(ctx context.Context, ownerID, actorID, goalID uuid.UUI
 		}
 		term.Version = maxVersion + 1
 		if err := s.store.InsertTerm(ctx, tx, term, categoryIDs); err != nil {
+			if db.IsDuplicate(err) {
+				return nil, nil, apperr.Conflict("CONFLICT", "该生效期间已有条款")
+			}
 			return nil, nil, err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "saving_goal_term", EntityID: term.ID, Action: "create",
 			ActorID: actorID, RequestID: requestID, After: termView(term),
-		})
+		}); err != nil {
+			return nil, nil, err
+		}
 		return termView(term), &term.ID, nil
 	})
 	return body, replay, err
 }
 
-func (s *Service) Achievements(ctx context.Context, ownerID, goalID uuid.UUID, from, to domain.Period) (any, error) {
-	goal, err := s.store.GetGoal(ctx, ownerID, goalID)
-	if err != nil {
-		return nil, apperr.NotFound("目标不存在")
-	}
-	terms, err := s.store.ListTerms(ctx, ownerID, goalID)
-	if err != nil {
-		return nil, err
-	}
+func (s *Service) Achievements(ctx context.Context, ownerID, goalID uuid.UUID, from, to domain.Period, includeProjection bool) (any, error) {
 	now := time.Now().UTC()
 	current := domain.PeriodFromTime(now, s.loc)
 	if to.After(current) {
@@ -297,15 +306,45 @@ func (s *Service) Achievements(ctx context.Context, ownerID, goalID uuid.UUID, f
 	if len(domain.PeriodsBetween(from, to)) > 36 {
 		return nil, apperr.Validation("查询范围最多 36 个月")
 	}
-	queryFrom := from.Start(s.loc).AddDate(0, -1, 0).UTC()
-	queryTo := to.End(s.loc).UTC()
-	monthly, err := s.store.MonthlySpend(ctx, ownerID, queryFrom, queryTo)
+
+	var goal *domain.SavingGoal
+	var terms []domain.GoalTerm
+	var rows []domain.AchievementRow
+	var summary domain.AchievementSummary
+	err := db.WithTx(ctx, s.db, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(tx *sql.Tx) error {
+		var err error
+		goal, err = s.store.GetGoalTx(ctx, tx, ownerID, goalID)
+		if err != nil {
+			return err
+		}
+		terms, err = s.store.ListTermsTx(ctx, tx, ownerID, goalID)
+		if err != nil {
+			return err
+		}
+		monthly, err := s.store.MonthlySpendTx(ctx, tx, ownerID,
+			from.Start(s.loc).AddDate(0, -1, 0).UTC(), to.End(s.loc).UTC())
+		if err != nil {
+			return err
+		}
+		rows, summary = domain.BuildAchievements(domain.AchievementInput{
+			Goal: *goal, Terms: terms, Monthly: monthly, From: from, To: to, Now: now, Loc: s.loc,
+		})
+		if !includeProjection {
+			for i := range rows {
+				rows[i].ProjectedSpendFen = nil
+				rows[i].ProjectedSavedFen = nil
+				rows[i].ProjectionKind = nil
+				rows[i].OnTrack = nil
+			}
+		}
+		return nil
+	})
 	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, apperr.NotFound("目标不存在")
+		}
 		return nil, err
 	}
-	rows, summary := domain.BuildAchievements(domain.AchievementInput{
-		Goal: *goal, Terms: terms, Monthly: monthly, From: from, To: to, Now: now, Loc: s.loc,
-	})
 	termViews := make([]any, 0, len(terms))
 	for i := range terms {
 		termViews = append(termViews, termView(&terms[i]))
@@ -324,43 +363,50 @@ func (s *Service) Achievements(ctx context.Context, ownerID, goalID uuid.UUID, f
 }
 
 func (s *Service) Overview(ctx context.Context, ownerID uuid.UUID, period domain.Period) (any, error) {
-	page, err := s.store.ListGoals(ctx, ownerID, domain.GoalActive, "", 100)
-	if err != nil {
-		return nil, err
-	}
 	items := make([]any, 0)
 	now := time.Now().UTC()
 	current := domain.PeriodFromTime(now, s.loc)
 	if period.After(current) {
 		return map[string]any{"period": period.String(), "goals": items}, nil
 	}
-	monthly, err := s.store.MonthlySpend(ctx, ownerID, period.Start(s.loc).AddDate(0, -1, 0).UTC(), period.End(s.loc).UTC())
+	err := db.WithTx(ctx, s.db, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, func(tx *sql.Tx) error {
+		goals, err := s.store.ListGoalsTx(ctx, tx, ownerID, domain.GoalActive, 100)
+		if err != nil {
+			return err
+		}
+		monthly, err := s.store.MonthlySpendTx(ctx, tx, ownerID,
+			period.Start(s.loc).AddDate(0, -1, 0).UTC(), period.End(s.loc).UTC())
+		if err != nil {
+			return err
+		}
+		for i := range goals {
+			goal := &goals[i]
+			if period.Before(goal.StartPeriod) || (goal.EndPeriod != nil && period.After(*goal.EndPeriod)) {
+				continue
+			}
+			terms, err := s.store.ListTermsTx(ctx, tx, ownerID, goal.ID)
+			if err != nil {
+				return err
+			}
+			rows, _ := domain.BuildAchievements(domain.AchievementInput{
+				Goal: *goal, Terms: terms, Monthly: monthly, From: period, To: period, Now: now, Loc: s.loc,
+			})
+			if len(rows) == 0 {
+				continue
+			}
+			row := rows[0]
+			items = append(items, map[string]any{
+				"goalId": goal.ID, "name": goal.Name, "status": row.Status,
+				"baselineFen": row.BaselineFen, "spendFen": row.SpendFen,
+				"savedFen": row.SavedFen, "targetSavingFen": row.TargetSavingFen,
+				"achievementBps": row.AchievementBps, "onTrack": row.OnTrack,
+				"achievedSoFar": row.AchievedSoFar,
+			})
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	for i := range page.Items {
-		goal := &page.Items[i]
-		if period.Before(goal.StartPeriod) || (goal.EndPeriod != nil && period.After(*goal.EndPeriod)) {
-			continue
-		}
-		terms, err := s.store.ListTerms(ctx, ownerID, goal.ID)
-		if err != nil {
-			return nil, err
-		}
-		rows, _ := domain.BuildAchievements(domain.AchievementInput{
-			Goal: *goal, Terms: terms, Monthly: monthly, From: period, To: period, Now: now, Loc: s.loc,
-		})
-		if len(rows) == 0 {
-			continue
-		}
-		row := rows[0]
-		items = append(items, map[string]any{
-			"goalId": goal.ID, "name": goal.Name, "status": row.Status,
-			"baselineFen": row.BaselineFen, "spendFen": row.SpendFen,
-			"savedFen": row.SavedFen, "targetSavingFen": row.TargetSavingFen,
-			"achievementBps": row.AchievementBps, "onTrack": row.OnTrack,
-			"achievedSoFar": row.AchievedSoFar,
-		})
 	}
 	return map[string]any{"period": period.String(), "goals": items}, nil
 }

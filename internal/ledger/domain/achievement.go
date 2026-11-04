@@ -74,7 +74,7 @@ func BuildAchievements(input AchievementInput) ([]AchievementRow, AchievementSum
 		end = current
 	}
 	if end.Before(start) {
-		return nil, AchievementSummary{}
+		return []AchievementRow{}, AchievementSummary{}
 	}
 
 	terms := append([]GoalTerm(nil), input.Terms...)
@@ -82,7 +82,7 @@ func BuildAchievements(input AchievementInput) ([]AchievementRow, AchievementSum
 		return terms[i].EffectiveFromPeriod.Before(terms[j].EffectiveFromPeriod)
 	})
 	if len(terms) == 0 {
-		return nil, AchievementSummary{}
+		return []AchievementRow{}, AchievementSummary{}
 	}
 
 	type key struct {
@@ -148,7 +148,7 @@ func BuildAchievements(input AchievementInput) ([]AchievementRow, AchievementSum
 		return net, count
 	}
 
-	var rows []AchievementRow
+	rows := make([]AchievementRow, 0)
 	summary := AchievementSummary{}
 	for period := start; !period.After(end); period = period.Next() {
 		term := termFor(period)

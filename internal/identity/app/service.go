@@ -25,14 +25,19 @@ import (
 )
 
 type Service struct {
-	db    *sql.DB
-	store *identitystore.Store
-	cfg   *config.Config
-	loc   *time.Location
+	db       *sql.DB
+	store    *identitystore.Store
+	cfg      *config.Config
+	loc      *time.Location
+	defaults func(context.Context, *sql.Tx, uuid.UUID) error
 }
 
 func New(database *sql.DB, store *identitystore.Store, cfg *config.Config) *Service {
 	return &Service{db: database, store: store, cfg: cfg, loc: cfg.Location()}
+}
+
+func (s *Service) SetDefaults(fn func(context.Context, *sql.Tx, uuid.UUID) error) {
+	s.defaults = fn
 }
 
 type AuthResult struct {
@@ -118,6 +123,11 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (*AuthResul
 		if insertErr := s.store.InsertUser(ctx, tx, user); insertErr != nil {
 			return insertErr
 		}
+		if s.defaults != nil {
+			if defaultsErr := s.defaults(ctx, tx, user.ID); defaultsErr != nil {
+				return defaultsErr
+			}
+		}
 		return s.store.InsertSession(ctx, tx, session)
 	})
 	if err != nil {
@@ -137,6 +147,9 @@ func (s *Service) Login(ctx context.Context, email, plainPassword string) (*Auth
 	user, err := s.store.FindUserByEmail(ctx, normalized)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
+			// Unknown email still pays one Argon2 verification so response time
+			// cannot be used to enumerate registered addresses.
+			password.VerifyDummy(plainPassword)
 			return nil, apperr.New(401, "INVALID_CREDENTIALS", "邮箱或密码不正确")
 		}
 		return nil, err
@@ -216,6 +229,7 @@ func (s *Service) ChangePassword(ctx context.Context, principal identity.Princip
 		return err
 	}
 	if !password.Verify(current, user.PasswordHash) {
+		_ = s.store.UpdateLoginFailure(ctx, s.db, user.ID)
 		return apperr.New(401, "INVALID_CREDENTIALS", "当前密码不正确")
 	}
 	if !domain.ValidPassword(next) {
@@ -290,6 +304,7 @@ func (s *Service) DeleteAccount(ctx context.Context, principal identity.Principa
 		return err
 	}
 	if !password.Verify(plainPassword, user.PasswordHash) {
+		_ = s.store.UpdateLoginFailure(ctx, s.db, user.ID)
 		return apperr.New(401, "INVALID_CREDENTIALS", "密码不正确")
 	}
 	return db.WithTx(ctx, s.db, nil, func(tx *sql.Tx) error {

@@ -492,7 +492,7 @@ func (h *Handler) achievements(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, err := h.service.Achievements(r.Context(), p.User.ID, id, from, to)
+	body, err := h.service.Achievements(r.Context(), p.User.ID, id, from, to, boolQueryDefault(r, "includeProjection", true))
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -599,7 +599,14 @@ func pathID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 }
 
 func boolQuery(r *http.Request, key string) bool {
+	return boolQueryDefault(r, key, false)
+}
+
+func boolQueryDefault(r *http.Request, key string, fallback bool) bool {
 	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key)))
+	if value == "" {
+		return fallback
+	}
 	return value == "1" || value == "true" || value == "yes"
 }
 

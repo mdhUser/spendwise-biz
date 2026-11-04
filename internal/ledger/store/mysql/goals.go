@@ -294,3 +294,93 @@ func (s *Store) LatestTermEffective(ctx context.Context, q queryer, goalID uuid.
 	}
 	return &value, nil
 }
+
+func (s *Store) GetGoalTx(ctx context.Context, q queryer, ownerID, id uuid.UUID) (*domain.SavingGoal, error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT id, owner_id, name, status, start_period, end_period, version, archived_at,
+		       created_at, updated_at
+		FROM saving_goals WHERE id = ? AND owner_id = ?`, db.UUIDBytes(id), db.UUIDBytes(ownerID))
+	return scanGoal(row)
+}
+
+func (s *Store) ListGoalsTx(ctx context.Context, q queryer, ownerID uuid.UUID, status string, limit int) ([]domain.SavingGoal, error) {
+	query := `SELECT id, owner_id, name, status, start_period, end_period, version, archived_at,
+	                 created_at, updated_at
+	          FROM saving_goals WHERE owner_id = ?`
+	args := []any{db.UUIDBytes(ownerID)}
+	if status != "" {
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.SavingGoal
+	for rows.Next() {
+		goal, err := scanGoal(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *goal)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListTermsTx(ctx context.Context, q queryer, ownerID, goalID uuid.UUID) ([]domain.GoalTerm, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, goal_id, owner_id, version, effective_from_period, scope_kind,
+		       baseline_kind, baseline_fen, initial_baseline_fen, target_saving_fen, created_at
+		FROM saving_goal_terms
+		WHERE goal_id = ? AND owner_id = ?
+		ORDER BY version ASC`, db.UUIDBytes(goalID), db.UUIDBytes(ownerID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var terms []domain.GoalTerm
+	for rows.Next() {
+		term, err := scanTerm(rows)
+		if err != nil {
+			return nil, err
+		}
+		terms = append(terms, *term)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range terms {
+		categoryIDs, err := s.termCategoriesTx(ctx, q, ownerID, terms[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		terms[i].CategoryIDs = categoryIDs
+	}
+	return terms, nil
+}
+
+func (s *Store) termCategoriesTx(ctx context.Context, q queryer, ownerID, termID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT category_id FROM saving_goal_term_categories
+		WHERE term_id = ? AND owner_id = ?`, db.UUIDBytes(termID), db.UUIDBytes(ownerID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		id, err := db.UUIDFromBytes(raw)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}

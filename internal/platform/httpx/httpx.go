@@ -78,6 +78,13 @@ func WriteJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
+// WriteNoContent writes a 204 with the same no-store policy as JSON responses
+// so proxies and browsers do not cache auth state changes.
+func WriteNoContent(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	apiErr := &APIError{Status: http.StatusInternalServerError, Code: "INTERNAL", Message: "服务暂时不可用，请稍后再试"}
 	var known *APIError
@@ -87,8 +94,12 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 		apiErr = known
 	case errors.As(err, &appKnown):
 		apiErr = &APIError{Status: appKnown.Status, Code: appKnown.Code, Message: appKnown.Message, Details: appKnown.Details}
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
-		apiErr = New(http.StatusServiceUnavailable, "UNAVAILABLE", "请求超时，请稍后再试")
+	default:
+		if mapped, ok := mysqlAPIError(err); ok {
+			apiErr = mapped
+		} else if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			apiErr = New(http.StatusServiceUnavailable, "UNAVAILABLE", "请求超时，请稍后再试")
+		}
 	}
 	body := map[string]any{
 		"error": map[string]any{

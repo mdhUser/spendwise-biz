@@ -6,6 +6,7 @@ services:
       MYSQL_DATABASE: spendwise_biz
       MYSQL_USER: biz_app
       MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD}
+      MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:?Set MYSQL_MIGRATOR_PASSWORD}
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
@@ -14,6 +15,7 @@ services:
       - "127.0.0.1:3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD"]
       interval: 5s
@@ -26,7 +28,8 @@ services:
     env_file:
       - .env
     environment:
-      BIZ_MYSQL_DSN: biz_app:${MYSQL_APP_PASSWORD}@tcp(db:3306)/spendwise_biz?parseTime=true&loc=UTC
+      BIZ_MYSQL_DSN: biz_migrator:${MYSQL_MIGRATOR_PASSWORD}@tcp(db:3306)/spendwise_biz?parseTime=true&loc=UTC
+      BIZ_MIGRATION_DSN: biz_migrator:${MYSQL_MIGRATOR_PASSWORD}@tcp(db:3306)/spendwise_biz?parseTime=true&loc=UTC
     depends_on:
       db:
         condition: service_healthy

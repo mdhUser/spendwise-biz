@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -27,19 +29,48 @@ type CreateTransactionInput struct {
 }
 
 type UpdateTransactionInput struct {
-	Type       *string    `json:"type"`
-	AmountFen  *int64     `json:"amountFen"`
-	OccurredAt *string    `json:"occurredAt"`
-	CategoryID *uuid.UUID `json:"categoryId"`
-	AccountID  *uuid.UUID `json:"accountId"`
-	Note       *string    `json:"note"`
-	Merchant   *string    `json:"merchant"`
-	Tags       []string   `json:"tags"`
-	Version    int        `json:"version"`
+	Type       *string      `json:"type"`
+	AmountFen  *int64       `json:"amountFen"`
+	OccurredAt *string      `json:"occurredAt"`
+	CategoryID OptionalUUID `json:"categoryId"`
+	AccountID  OptionalUUID `json:"accountId"`
+	Note       *string      `json:"note"`
+	Merchant   *string      `json:"merchant"`
+	Tags       []string     `json:"tags"`
+	Version    int          `json:"version"`
+}
+
+// OptionalUUID distinguishes the three JSON states of a PATCH field:
+// omitted (Set is false), explicit null (Set is true, Value is nil), and a
+// concrete value (Set is true, Value points at the parsed UUID).
+type OptionalUUID struct {
+	Set   bool
+	Value *uuid.UUID
+}
+
+func (o *OptionalUUID) UnmarshalJSON(data []byte) error {
+	o.Set = true
+	if string(data) == "null" {
+		o.Value = nil
+		return nil
+	}
+	var id uuid.UUID
+	if err := json.Unmarshal(data, &id); err != nil {
+		return fmt.Errorf("id must be a UUID: %w", err)
+	}
+	o.Value = &id
+	return nil
+}
+
+// transactionRefOptions relaxes the archived checks for references that are
+// already stored on the transaction. Kind matching is always enforced.
+type transactionRefOptions struct {
+	allowArchivedCategory bool
+	allowArchivedAccount  bool
 }
 
 func (s *Service) CreateTransaction(ctx context.Context, ownerID, actorID uuid.UUID, requestID, key string, input CreateTransactionInput) (any, bool, error) {
-	tx, err := s.buildTransaction(ctx, ownerID, input)
+	tx, err := s.buildTransaction(ctx, ownerID, input, transactionRefOptions{})
 	if err != nil {
 		return nil, false, err
 	}
@@ -51,16 +82,18 @@ func (s *Service) CreateTransaction(ctx context.Context, ownerID, actorID uuid.U
 			return nil, nil, err
 		}
 		view := s.transactionView(ctx, ownerID, tx)
-		_ = s.store.InsertAudit(ctx, sqlTx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, sqlTx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "transaction", EntityID: tx.ID, Action: "create",
 			ActorID: actorID, RequestID: requestID, After: view,
-		})
+		}); err != nil {
+			return nil, nil, err
+		}
 		return view, &tx.ID, nil
 	})
 	return body, replay, err
 }
 
-func (s *Service) buildTransaction(ctx context.Context, ownerID uuid.UUID, input CreateTransactionInput) (*domain.Transaction, error) {
+func (s *Service) buildTransaction(ctx context.Context, ownerID uuid.UUID, input CreateTransactionInput, refs transactionRefOptions) (*domain.Transaction, error) {
 	txType := domain.TransactionType(input.Type)
 	if !txType.Valid() {
 		return nil, apperr.Validation("流水类型不合法")
@@ -99,31 +132,27 @@ func (s *Service) buildTransaction(ctx context.Context, ownerID uuid.UUID, input
 		return nil, apperr.Validation("标签不能超过 10 个")
 	}
 	if input.CategoryID != nil {
-		ok, err := s.store.HasCategory(ctx, ownerID, *input.CategoryID)
+		category, err := s.store.GetCategory(ctx, ownerID, *input.CategoryID)
 		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				return nil, apperr.Validation("分类不存在或已归档")
+			}
 			return nil, err
 		}
-		if !ok {
-			return nil, apperr.Validation("分类不存在或已归档")
-		}
-		kind, err := s.store.CategoryKind(ctx, ownerID, *input.CategoryID)
-		if err != nil {
+		if err := validateCategoryReference(category, txType, refs.allowArchivedCategory); err != nil {
 			return nil, err
-		}
-		if txType == domain.TransactionIncome && kind != "income" {
-			return nil, apperr.Validation("收入流水必须使用收入分类")
-		}
-		if txType != domain.TransactionIncome && kind != "expense" {
-			return nil, apperr.Validation("支出/退款流水必须使用支出分类")
 		}
 	}
 	if input.AccountID != nil {
-		ok, err := s.store.HasAccount(ctx, ownerID, *input.AccountID)
+		account, err := s.store.GetAccount(ctx, ownerID, *input.AccountID)
 		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				return nil, apperr.Validation("账户不存在或已归档")
+			}
 			return nil, err
 		}
-		if !ok {
-			return nil, apperr.Validation("账户不存在或已归档")
+		if err := validateAccountReference(account, refs.allowArchivedAccount); err != nil {
+			return nil, err
 		}
 	}
 	return &domain.Transaction{
@@ -153,12 +182,17 @@ func (s *Service) ListTransactions(ctx context.Context, ownerID uuid.UUID, filte
 	return map[string]any{"items": items, "nextCursor": nullableString(page.NextCursor)}, nil
 }
 
-func (s *Service) UpdateTransaction(ctx context.Context, ownerID, actorID, transactionID uuid.UUID, requestID string, input UpdateTransactionInput) (any, error) {
-	current, err := s.store.GetTransaction(ctx, ownerID, transactionID)
-	if err != nil {
-		return nil, apperr.NotFound("流水不存在")
-	}
-	before := s.transactionView(ctx, ownerID, current)
+type transactionPatch struct {
+	input           CreateTransactionInput
+	categoryChanged bool
+	accountChanged  bool
+}
+
+// mergeTransactionUpdate applies a PATCH document to the current transaction.
+// categoryChanged/accountChanged are false when the field was omitted or when
+// the supplied value is identical to the stored one, which lets updates keep
+// referencing an archived category/account.
+func mergeTransactionUpdate(current *domain.Transaction, input UpdateTransactionInput) transactionPatch {
 	combined := CreateTransactionInput{
 		Type: string(current.Type), AmountFen: current.AmountFen,
 		OccurredAt: current.OccurredAt.Format(time.RFC3339),
@@ -174,11 +208,11 @@ func (s *Service) UpdateTransaction(ctx context.Context, ownerID, actorID, trans
 	if input.OccurredAt != nil {
 		combined.OccurredAt = *input.OccurredAt
 	}
-	if input.CategoryID != nil {
-		combined.CategoryID = input.CategoryID
+	if input.CategoryID.Set {
+		combined.CategoryID = input.CategoryID.Value
 	}
-	if input.AccountID != nil {
-		combined.AccountID = input.AccountID
+	if input.AccountID.Set {
+		combined.AccountID = input.AccountID.Value
 	}
 	if input.Note != nil {
 		combined.Note = *input.Note
@@ -189,7 +223,51 @@ func (s *Service) UpdateTransaction(ctx context.Context, ownerID, actorID, trans
 	if input.Tags != nil {
 		combined.Tags = input.Tags
 	}
-	rebuilt, err := s.buildTransaction(ctx, ownerID, combined)
+	return transactionPatch{
+		input:           combined,
+		categoryChanged: input.CategoryID.Set && !sameUUIDPtr(current.CategoryID, input.CategoryID.Value),
+		accountChanged:  input.AccountID.Set && !sameUUIDPtr(current.AccountID, input.AccountID.Value),
+	}
+}
+
+func sameUUIDPtr(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func validateCategoryReference(category *domain.Category, txType domain.TransactionType, allowArchived bool) error {
+	if category.ArchivedAt != nil && !allowArchived {
+		return apperr.Validation("分类不存在或已归档")
+	}
+	if txType == domain.TransactionIncome && category.Kind != "income" {
+		return apperr.Validation("收入流水必须使用收入分类")
+	}
+	if txType != domain.TransactionIncome && category.Kind != "expense" {
+		return apperr.Validation("支出/退款流水必须使用支出分类")
+	}
+	return nil
+}
+
+func validateAccountReference(account *domain.Account, allowArchived bool) error {
+	if account.ArchivedAt != nil && !allowArchived {
+		return apperr.Validation("账户不存在或已归档")
+	}
+	return nil
+}
+
+func (s *Service) UpdateTransaction(ctx context.Context, ownerID, actorID, transactionID uuid.UUID, requestID string, input UpdateTransactionInput) (any, error) {
+	current, err := s.store.GetTransaction(ctx, ownerID, transactionID)
+	if err != nil {
+		return nil, apperr.NotFound("流水不存在")
+	}
+	before := s.transactionView(ctx, ownerID, current)
+	patch := mergeTransactionUpdate(current, input)
+	rebuilt, err := s.buildTransaction(ctx, ownerID, patch.input, transactionRefOptions{
+		allowArchivedCategory: !patch.categoryChanged,
+		allowArchivedAccount:  !patch.accountChanged,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -205,11 +283,13 @@ func (s *Service) UpdateTransaction(ctx context.Context, ownerID, actorID, trans
 			}
 			return err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "transaction", EntityID: rebuilt.ID, Action: "update",
 			ActorID: actorID, RequestID: requestID, Before: before,
 			After: s.transactionView(ctx, ownerID, rebuilt),
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -223,14 +303,18 @@ func (s *Service) DeleteTransaction(ctx context.Context, ownerID, actorID, trans
 	return db.WithTx(ctx, s.db, nil, func(tx *sql.Tx) error {
 		if err := s.store.SoftDeleteTransaction(ctx, tx, ownerID, transactionID, time.Now().UTC()); err != nil {
 			if errors.Is(err, ledgerstore.ErrConflict) {
-				return apperr.NotFound("流水不存在或已删除")
+				// Deleting an already-deleted or missing row is idempotent from
+				// the client's perspective; the design requires 204 on repeat.
+				return nil
 			}
 			return err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "transaction", EntityID: transactionID, Action: "delete",
 			ActorID: actorID, RequestID: requestID,
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -243,10 +327,12 @@ func (s *Service) RestoreTransaction(ctx context.Context, ownerID, actorID, tran
 			}
 			return err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "transaction", EntityID: transactionID, Action: "restore",
 			ActorID: actorID, RequestID: requestID,
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 }

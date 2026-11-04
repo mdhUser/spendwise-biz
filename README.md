@@ -19,10 +19,13 @@ SpendWise 的核心后端业务仓库。首期实现 `ledger` 模块：用户记
 ```bash
 cp .env.example .env
 # 修改 .env 中的 MYSQL_ROOT_PASSWORD、MYSQL_APP_PASSWORD、BIZ_INVITE_PEPPER
-# 同时把 BIZ_MYSQL_DSN 里的密码改成与 MYSQL_APP_PASSWORD 一致
+# 同时把 BIZ_MYSQL_DSN / BIZ_MIGRATION_DSN 里的密码改成分别与
+# MYSQL_APP_PASSWORD / MYSQL_MIGRATOR_PASSWORD 一致
 # BIZ_INVITE_PEPPER 至少 32 个字符
 
 docker compose up -d db
+# 首次初始化会执行 db/init/01-users.sh，创建 biz_migrator 并收回 biz_app 的 DDL 权限
+# 如果 mysql_data 卷已存在，需要手动执行该脚本或重建卷
 go run ./cmd/migrate
 go run ./cmd/admin invite create -uses 20 -ttl 720h
 go run ./cmd/api
@@ -132,17 +135,21 @@ cmd/admin      邀请码等运营命令
 internal/identity  账号/会话/邀请（共享内核）
 internal/ledger    记账/目标/实现表（首期模块）
 internal/httpserver 路由装配、鉴权、日志、恢复
-internal/platform   config/db/httpx/apperr/id/clock
+internal/platform   config/db/httpx/apperr/id/migrate
 migrations/identity identity 表
 migrations/ledger   ledger 表
+migrations/shared   跨模块索引等共享迁移
 ```
 
-后续核心业务按 `internal/<module>/{domain,app,port,store,http}` 扩展；模块间不允许直接读写对方表或跨模块 JOIN。MySQL 中表按模块划分所有权，后续模块使用模块前缀。
+后续核心业务按 `internal/<module>/{domain,app,store,http}` 扩展；模块间不允许直接读写对方表或跨模块 JOIN。MySQL 中表按模块划分所有权，后续模块使用模块前缀。
 
 ## 当前限制
 
 - 首期只实现 `identity` + `ledger`；购物编排、商品目录、平替/核算等尚未迁入。
 - 未实现邮件/短信找回密码、CSV 导入、转账、多币种、共享账本。
+- 进程内没有入口 IP 限流；登录/注册的入口限流应放在 BFF/反向代理，Go 侧已实现 Argon2 并发闸门与账户阶梯锁定。
+- 幂等采用同事务占位行：并发同 key 会等待首个请求提交后重放；`IDEMPOTENCY_IN_PROGRESS` 只在异常遗留 pending 行时出现，不是常规路径。
+- 未实现账号注销的“最近重认证”限制；账号注销需要当前密码。
 - 标签目前只存取，不做筛选索引。
 - MySQL 没有部分索引，软删除行仍占索引空间；后续按数据量加归档/清理。
 - 目标实现表读时计算，不冻结已结束月份；补记历史流水会重算过去月份。
@@ -153,6 +160,12 @@ migrations/ledger   ledger 表
 go test ./...
 go vet ./...
 go build ./...
+```
+
+清理过期会话/幂等记录（可由 cron 调用）：
+
+```bash
+go run ./cmd/admin cleanup -session-retention 720h
 ```
 
 ## 安全说明

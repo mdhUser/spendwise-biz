@@ -3,7 +3,7 @@ package http
 import (
 	"context"
 	"database/sql"
-	"log/slog"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -11,21 +11,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/mdhuser/spendwise-biz/internal/identity"
 	identityapp "github.com/mdhuser/spendwise-biz/internal/identity/app"
+	"github.com/mdhuser/spendwise-biz/internal/platform/apperr"
 	"github.com/mdhuser/spendwise-biz/internal/platform/httpx"
 )
 
 type Handler struct {
-	service  *identityapp.Service
-	defaults func(ctx context.Context, userID uuid.UUID) error
-	purge    func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error
+	service *identityapp.Service
+	purge   func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error
 }
 
 func New(service *identityapp.Service) *Handler {
 	return &Handler{service: service}
-}
-
-func (h *Handler) SetDefaults(fn func(ctx context.Context, userID uuid.UUID) error) {
-	h.defaults = fn
 }
 
 func (h *Handler) SetPurge(fn func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error) {
@@ -61,11 +57,6 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	if h.defaults != nil {
-		if err := h.defaults(r.Context(), result.User.ID); err != nil {
-			slog.Warn("default_ledger_setup_failed", "user_id", result.User.ID, "error", err.Error())
-		}
-	}
 	httpx.WriteJSON(w, http.StatusCreated, authResponse(result))
 }
 
@@ -82,6 +73,10 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.service.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
+		var appErr *apperr.Error
+		if errors.As(err, &appErr) && appErr.Code == "ACCOUNT_LOCKED" {
+			w.Header().Set("Retry-After", "900")
+		}
 		httpx.WriteError(w, r, err)
 		return
 	}
@@ -93,7 +88,7 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	if raw != "" {
 		_ = h.service.Logout(r.Context(), raw)
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httpx.WriteNoContent(w)
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +128,7 @@ func (h *Handler) password(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httpx.WriteNoContent(w)
 }
 
 func authResponse(result *identityapp.AuthResult) map[string]any {
@@ -186,5 +181,5 @@ func (h *Handler) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	httpx.WriteNoContent(w)
 }

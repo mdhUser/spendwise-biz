@@ -279,18 +279,25 @@ func (s *Store) Summary(ctx context.Context, ownerID uuid.UUID, from, to time.Ti
 		return domain.Summary{}, err
 	}
 	summary.NetSpendFen = summary.ExpenseFen - summary.RefundFen
+	summary.Groups = []domain.SummaryGroup{}
 
-	var keyExpr string
+	var keyExpr, categoryExpr, groupByClause string
 	switch groupBy {
 	case "month":
 		keyExpr = "DATE_FORMAT(DATE_ADD(t.occurred_at, INTERVAL 8 HOUR), '%Y-%m')"
+		categoryExpr = "NULL"
+		groupByClause = "group_key"
 	case "day":
 		keyExpr = "DATE_FORMAT(DATE_ADD(t.occurred_at, INTERVAL 8 HOUR), '%Y-%m-%d')"
+		categoryExpr = "NULL"
+		groupByClause = "group_key"
 	default:
 		keyExpr = "COALESCE(c.name, '未分类')"
+		categoryExpr = "t.category_id"
+		groupByClause = "group_key, t.category_id"
 	}
 	query := fmt.Sprintf(`
-		SELECT %s AS group_key, t.category_id,
+		SELECT %s AS group_key, %s AS category_id,
 		       COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount_fen ELSE 0 END), 0) AS expense_fen,
 		       COALESCE(SUM(CASE WHEN t.type = 'refund' THEN t.amount_fen ELSE 0 END), 0) AS refund_fen
 		FROM transactions t
@@ -298,8 +305,8 @@ func (s *Store) Summary(ctx context.Context, ownerID uuid.UUID, from, to time.Ti
 		WHERE t.owner_id = ? AND t.deleted_at IS NULL
 		  AND t.occurred_at >= ? AND t.occurred_at < ?
 		  AND t.type IN ('expense', 'refund')
-		GROUP BY group_key, t.category_id
-		ORDER BY group_key ASC`, keyExpr)
+		GROUP BY %s
+		ORDER BY group_key ASC`, keyExpr, categoryExpr, groupByClause)
 	rows, err := s.db.QueryContext(ctx, query, db.UUIDBytes(ownerID), from, to)
 	if err != nil {
 		return domain.Summary{}, err
@@ -348,4 +355,44 @@ func (s *Store) CategoryKind(ctx context.Context, ownerID, categoryID uuid.UUID)
 		return "", domain.ErrNotFound
 	}
 	return kind, err
+}
+
+// MonthlySpendTx is the read-only-transaction variant used by achievement
+// queries so goal/terms/spend come from one consistent snapshot.
+func (s *Store) MonthlySpendTx(ctx context.Context, q queryer, ownerID uuid.UUID, from, to time.Time) ([]domain.MonthlySpend, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT EXTRACT(YEAR_MONTH FROM DATE_ADD(occurred_at, INTERVAL 8 HOUR)) AS period_ym,
+		       category_id,
+		       CAST(SUM(CASE WHEN type = 'expense' THEN amount_fen ELSE -amount_fen END) AS SIGNED) AS net_fen,
+		       COUNT(*) AS record_count
+		FROM transactions
+		WHERE owner_id = ? AND deleted_at IS NULL
+		  AND type IN ('expense', 'refund')
+		  AND occurred_at >= ? AND occurred_at < ?
+		GROUP BY period_ym, category_id
+		ORDER BY period_ym ASC`, db.UUIDBytes(ownerID), from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.MonthlySpend
+	for rows.Next() {
+		var yearMonth int
+		var category []byte
+		var net, count int64
+		if err := rows.Scan(&yearMonth, &category, &net, &count); err != nil {
+			return nil, err
+		}
+		categoryID, err := db.UUIDPtrFromBytes(category)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, domain.MonthlySpend{
+			Period:      domain.NewPeriod(yearMonth/100, time.Month(yearMonth%100)),
+			CategoryID:  categoryID,
+			NetFen:      net,
+			RecordCount: count,
+		})
+	}
+	return out, rows.Err()
 }

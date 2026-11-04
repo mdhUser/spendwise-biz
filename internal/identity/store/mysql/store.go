@@ -172,6 +172,9 @@ func (s *Store) UpdateLoginFailure(ctx context.Context, q queryer, userID uuid.U
 		UPDATE users
 		SET failed_login_count = failed_login_count + 1,
 		    locked_until = CASE
+		        WHEN failed_login_count + 1 >= 20 THEN DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 24 HOUR)
+		        WHEN failed_login_count + 1 >= 15 THEN DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 HOUR)
+		        WHEN failed_login_count + 1 >= 10 THEN DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 30 MINUTE)
 		        WHEN failed_login_count + 1 >= 5 THEN DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 15 MINUTE)
 		        ELSE locked_until
 		    END,
@@ -292,6 +295,34 @@ func (s *Store) SessionByID(ctx context.Context, id uuid.UUID) (*domain.Session,
 		session.RevokedAt = &revoked.Time
 	}
 	return &session, nil
+}
+
+// DeleteExpiredSessions removes sessions that expired more than retention ago,
+// or that were revoked that long ago. It deletes in batches so a large backlog
+// does not hold one long transaction. Rows are already unusable at this point;
+// the delay keeps a short audit window before physical removal.
+func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time, retention time.Duration) (int64, error) {
+	cutoff := now.UTC().Add(-retention)
+	const batchSize = 1000
+	var total int64
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM sessions
+			WHERE expires_at < ? OR absolute_expires_at < ?
+			   OR (revoked_at IS NOT NULL AND revoked_at < ?)
+			LIMIT ?`, cutoff, cutoff, cutoff, batchSize)
+		if err != nil {
+			return total, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += affected
+		if affected < batchSize {
+			return total, nil
+		}
+	}
 }
 
 func (s *Store) Ping(ctx context.Context) error {

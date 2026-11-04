@@ -30,7 +30,11 @@ func New(database *sql.DB, store *ledgerstore.Store, cfg *config.Config) *Servic
 }
 
 func (s *Service) EnsureDefaults(ctx context.Context, ownerID uuid.UUID) error {
-	return s.store.EnsureDefaults(ctx, ownerID, time.Now().UTC())
+	return s.store.EnsureDefaults(ctx, s.db, ownerID, time.Now().UTC())
+}
+
+func (s *Service) EnsureDefaultsTx(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID) error {
+	return s.store.EnsureDefaults(ctx, tx, ownerID, time.Now().UTC())
 }
 
 func (s *Service) PurgeUser(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID) error {
@@ -128,10 +132,12 @@ func (s *Service) CreateAccount(ctx context.Context, ownerID, actorID uuid.UUID,
 			}
 			return nil, nil, err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "account", EntityID: account.ID, Action: "create",
 			ActorID: actorID, RequestID: requestID, After: accountView(account),
-		})
+		}); err != nil {
+			return nil, nil, err
+		}
 		return accountView(account), &account.ID, nil
 	})
 	return body, replay, err
@@ -177,10 +183,12 @@ func (s *Service) UpdateAccount(ctx context.Context, ownerID, actorID, accountID
 			}
 			return err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "account", EntityID: account.ID, Action: "update",
 			ActorID: actorID, RequestID: requestID, Before: before, After: accountView(account),
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -202,10 +210,12 @@ func (s *Service) ArchiveAccount(ctx context.Context, ownerID, actorID, accountI
 			}
 			return err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "account", EntityID: accountID, Action: "archive",
 			ActorID: actorID, RequestID: requestID,
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -274,10 +284,12 @@ func (s *Service) CreateCategory(ctx context.Context, ownerID, actorID uuid.UUID
 			}
 			return nil, nil, err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "category", EntityID: category.ID, Action: "create",
 			ActorID: actorID, RequestID: requestID, After: categoryView(category),
-		})
+		}); err != nil {
+			return nil, nil, err
+		}
 		return categoryView(category), &category.ID, nil
 	})
 	return body, replay, err
@@ -300,7 +312,9 @@ func (s *Service) UpdateCategory(ctx context.Context, ownerID, actorID, category
 		if !domain.ValidCategoryKind(*input.Kind) {
 			return nil, apperr.Validation("分类类型不合法")
 		}
-		category.Kind = *input.Kind
+		if *input.Kind != category.Kind {
+			return nil, apperr.Validation("分类类型创建后不可修改")
+		}
 	}
 	if input.Icon != nil {
 		category.Icon = *input.Icon
@@ -335,10 +349,12 @@ func (s *Service) UpdateCategory(ctx context.Context, ownerID, actorID, category
 			}
 			return err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "category", EntityID: category.ID, Action: "update",
 			ActorID: actorID, RequestID: requestID, Before: before, After: categoryView(category),
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -360,10 +376,12 @@ func (s *Service) ArchiveCategory(ctx context.Context, ownerID, actorID, categor
 			}
 			return err
 		}
-		_ = s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
+		if err := s.store.InsertAudit(ctx, tx, ledgerstore.AuditEvent{
 			OwnerID: ownerID, Entity: "category", EntityID: categoryID, Action: "archive",
 			ActorID: actorID, RequestID: requestID,
-		})
+		}); err != nil {
+			return err
+		}
 		return nil
 	})
 }

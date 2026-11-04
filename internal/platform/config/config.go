@@ -89,6 +89,9 @@ func (c *Config) Validate() error {
 	if c.HTTPAddr == "" {
 		return errors.New("BIZ_HTTP_ADDR must not be empty")
 	}
+	if c.Timezone != "Asia/Shanghai" {
+		return errors.New("BIZ_TIMEZONE must be Asia/Shanghai; ledger SQL uses a fixed +08:00 month boundary")
+	}
 	if _, err := time.LoadLocation(c.Timezone); err != nil {
 		return fmt.Errorf("invalid timezone %q: %w", c.Timezone, err)
 	}
