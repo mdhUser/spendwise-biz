@@ -1,0 +1,950 @@
+openapi: 3.0.3
+info:
+  title: SpendWise Biz Ledger API
+  version: 0.1.0
+  description: "First module of spendwise-biz: bookkeeping and saving-goal achievements."
+servers:
+  - url: http://127.0.0.1:8080
+security:
+  - bearerAuth: []
+paths:
+  /v1/ledger/accounts:
+    get:
+      summary: List accounts
+      parameters:
+        - $ref: '#/components/parameters/IncludeArchived'
+      responses:
+        '200':
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Account'
+        '401':
+          $ref: '#/components/responses/Error'
+    post:
+      summary: Create account
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, kind]
+              properties:
+                name:
+                  type: string
+                  maxLength: 40
+                kind:
+                  type: string
+                  enum: [cash, debit_card, credit_card, alipay, wechat, other]
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '200':
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '401':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/accounts/{id}:
+    patch:
+      summary: Update or archive an account
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                name:
+                  type: string
+                kind:
+                  type: string
+                archived:
+                  type: boolean
+                version:
+                  type: integer
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '409':
+          $ref: '#/components/responses/Error'
+    delete:
+      summary: Archive an account
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      responses:
+        '204':
+          description: Archived
+        '404':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/categories:
+    get:
+      summary: List categories
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [expense, income]
+        - $ref: '#/components/parameters/IncludeArchived'
+      responses:
+        '200':
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Category'
+    post:
+      summary: Create category
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, kind]
+              properties:
+                name:
+                  type: string
+                  maxLength: 40
+                kind:
+                  type: string
+                  enum: [expense, income]
+                icon:
+                  type: string
+                  maxLength: 40
+                color:
+                  type: string
+                  pattern: '^(#[0-9A-Fa-f]{6})?$'
+                sortOrder:
+                  type: integer
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '200':
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '409':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/categories/{id}:
+    patch:
+      summary: Update or archive a category
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                name:
+                  type: string
+                kind:
+                  type: string
+                icon:
+                  type: string
+                color:
+                  type: string
+                sortOrder:
+                  type: integer
+                archived:
+                  type: boolean
+                version:
+                  type: integer
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '409':
+          $ref: '#/components/responses/Error'
+    delete:
+      summary: Archive a category
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      responses:
+        '204':
+          description: Archived
+        '404':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/transactions:
+    get:
+      summary: List transactions
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [expense, income, refund]
+        - name: categoryId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: accountId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+                  nextCursor:
+                    type: string
+                    nullable: true
+    post:
+      summary: Create transaction
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransaction'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '200':
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '422':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/transactions/{id}:
+    get:
+      summary: Get transaction
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      responses:
+        '200':
+          description: Transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '404':
+          $ref: '#/components/responses/Error'
+    patch:
+      summary: Update transaction
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTransaction'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '409':
+          $ref: '#/components/responses/Error'
+    delete:
+      summary: Soft delete transaction
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/transactions/{id}/restore:
+    post:
+      summary: Restore a transaction deleted within 30 days
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      responses:
+        '204':
+          description: Restored
+        '404':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/summary:
+    get:
+      summary: Summarize spending
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: groupBy
+          in: query
+          schema:
+            type: string
+            enum: [category, month, day]
+            default: category
+      responses:
+        '200':
+          description: Summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Summary'
+  /v1/ledger/saving-goals:
+    get:
+      summary: List saving goals
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, archived]
+            default: active
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Goal'
+                  nextCursor:
+                    type: string
+                    nullable: true
+    post:
+      summary: Create saving goal and initial term
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGoal'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '200':
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '422':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/saving-goals/overview:
+    get:
+      summary: Current-period overview across active goals
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}$'
+      responses:
+        '200':
+          description: Overview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period:
+                    type: string
+                  goals:
+                    type: array
+                    items:
+                      type: object
+  /v1/ledger/saving-goals/{id}:
+    get:
+      summary: Get saving goal
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      responses:
+        '200':
+          description: Goal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '404':
+          $ref: '#/components/responses/Error'
+    patch:
+      summary: Update or archive a saving goal
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                name:
+                  type: string
+                endPeriod:
+                  type: string
+                  nullable: true
+                status:
+                  type: string
+                  enum: [active, archived]
+                version:
+                  type: integer
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Goal'
+        '409':
+          $ref: '#/components/responses/Error'
+    delete:
+      summary: Archive a saving goal
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+      responses:
+        '204':
+          description: Archived
+  /v1/ledger/saving-goals/{id}/terms:
+    post:
+      summary: Add an immutable term effective from a future period
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTerm'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Term'
+        '200':
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Term'
+        '422':
+          $ref: '#/components/responses/Error'
+  /v1/ledger/saving-goals/{id}/achievements:
+    get:
+      summary: Achievement table
+      parameters:
+        - $ref: '#/components/parameters/PathID'
+        - name: from
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}$'
+        - name: to
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{4}-\d{2}$'
+      responses:
+        '200':
+          description: Achievement table
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AchievementTable'
+        '422':
+          $ref: '#/components/responses/Error'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  parameters:
+    PathID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    IncludeArchived:
+      name: includeArchived
+      in: query
+      schema:
+        type: boolean
+        default: false
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  details: {}
+                  requestId:
+                    type: string
+  schemas:
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        kind:
+          type: string
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        version:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Category:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [expense, income]
+        icon:
+          type: string
+        color:
+          type: string
+        sortOrder:
+          type: integer
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        version:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CreateTransaction:
+      type: object
+      required: [type, amountFen, occurredAt]
+      properties:
+        type:
+          type: string
+          enum: [expense, income, refund]
+        amountFen:
+          type: integer
+          minimum: 1
+          maximum: 100000000000
+        occurredAt:
+          type: string
+          format: date-time
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        accountId:
+          type: string
+          format: uuid
+          nullable: true
+        note:
+          type: string
+          maxLength: 500
+        merchant:
+          type: string
+          maxLength: 120
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            maxLength: 20
+    UpdateTransaction:
+      type: object
+      required: [version]
+      properties:
+        type:
+          type: string
+          enum: [expense, income, refund]
+        amountFen:
+          type: integer
+          minimum: 1
+          maximum: 100000000000
+        occurredAt:
+          type: string
+          format: date-time
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        accountId:
+          type: string
+          format: uuid
+          nullable: true
+        note:
+          type: string
+          maxLength: 500
+        merchant:
+          type: string
+          maxLength: 120
+        tags:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            maxLength: 20
+        version:
+          type: integer
+    Transaction:
+      allOf:
+        - $ref: '#/components/schemas/CreateTransaction'
+        - type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            version:
+              type: integer
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+            category:
+              type: object
+              nullable: true
+            account:
+              type: object
+              nullable: true
+    Scope:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [all, categories]
+        categoryIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    Baseline:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [fixed, previous_period]
+        baselineFen:
+          type: integer
+          nullable: true
+        initialBaselineFen:
+          type: integer
+          nullable: true
+    CreateGoal:
+      type: object
+      required: [name, startPeriod, scope, baseline, targetSavingFen]
+      properties:
+        name:
+          type: string
+          maxLength: 60
+        startPeriod:
+          type: string
+          pattern: '^\d{4}-\d{2}$'
+        endPeriod:
+          type: string
+          nullable: true
+        scope:
+          $ref: '#/components/schemas/Scope'
+        baseline:
+          $ref: '#/components/schemas/Baseline'
+        targetSavingFen:
+          type: integer
+          minimum: 0
+          maximum: 100000000000
+    CreateTerm:
+      type: object
+      required: [effectiveFromPeriod, scope, baseline, targetSavingFen]
+      properties:
+        effectiveFromPeriod:
+          type: string
+          pattern: '^\d{4}-\d{2}$'
+        scope:
+          $ref: '#/components/schemas/Scope'
+        baseline:
+          $ref: '#/components/schemas/Baseline'
+        targetSavingFen:
+          type: integer
+    Term:
+      type: object
+      properties:
+        version:
+          type: integer
+        effectiveFromPeriod:
+          type: string
+        scope:
+          $ref: '#/components/schemas/Scope'
+        baseline:
+          $ref: '#/components/schemas/Baseline'
+        targetSavingFen:
+          type: integer
+    Goal:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, archived]
+        startPeriod:
+          type: string
+        endPeriod:
+          type: string
+          nullable: true
+        version:
+          type: integer
+        currentTerm:
+          allOf:
+            - $ref: '#/components/schemas/Term'
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Summary:
+      type: object
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+        currency:
+          type: string
+        incomeFen:
+          type: integer
+        expenseFen:
+          type: integer
+        refundFen:
+          type: integer
+        netSpendFen:
+          type: integer
+        groups:
+          type: array
+          items:
+            type: object
+    AchievementRow:
+      type: object
+      properties:
+        period:
+          type: string
+        periodStart:
+          type: string
+          format: date-time
+        periodEnd:
+          type: string
+          format: date-time
+        termVersion:
+          type: integer
+        scope:
+          $ref: '#/components/schemas/Scope'
+        baselineFen:
+          type: integer
+          nullable: true
+        baselineSource:
+          type: string
+        baselineAdjusted:
+          type: boolean
+        targetSavingFen:
+          type: integer
+        ceilingFen:
+          type: integer
+          nullable: true
+        spendFen:
+          type: integer
+        savedFen:
+          type: integer
+          nullable: true
+        gapFen:
+          type: integer
+          nullable: true
+        achievementBps:
+          type: integer
+          nullable: true
+        status:
+          type: string
+          enum: [achieved, missed, in_progress, baseline_missing, baseline_too_low]
+        achievedSoFar:
+          type: boolean
+        onTrack:
+          type: boolean
+          nullable: true
+        netRefund:
+          type: boolean
+        daysTotal:
+          type: integer
+        daysElapsed:
+          type: integer
+        projectedSpendFen:
+          type: integer
+          nullable: true
+        projectedSavedFen:
+          type: integer
+          nullable: true
+        projectionKind:
+          type: string
+          nullable: true
+        asOf:
+          type: string
+          format: date-time
+    AchievementTable:
+      type: object
+      properties:
+        goal:
+          type: object
+        range:
+          type: object
+        terms:
+          type: array
+          items:
+            $ref: '#/components/schemas/Term'
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/AchievementRow'
+        summary:
+          type: object
