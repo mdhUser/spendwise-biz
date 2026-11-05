@@ -19,9 +19,9 @@ import (
 // runs across processes/instances.
 const LockName = "spendwise_biz_migrations"
 
-// Modules lists migration directories in dependency order. identity must run
-// before ledger because ledger tables have foreign keys to users.
-var Modules = []string{"identity", "ledger", "shared"}
+// Modules lists migration directories in dependency order. Biz only owns the
+// ledger module; auth tables are created and owned by spendwise-auth.
+var Modules = []string{"ledger"}
 
 // Apply runs every pending goose migration up to the latest version.
 //

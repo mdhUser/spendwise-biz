@@ -2,7 +2,11 @@ openapi: 3.0.3
 info:
   title: SpendWise Biz Ledger API
   version: 0.1.0
-  description: "First module of spendwise-biz: bookkeeping and saving-goal achievements."
+  description: |
+    Bookkeeping and saving-goal achievements for spendwise-biz.
+    Bearer tokens are issued by spendwise-auth; biz validates them by calling
+    spendwise-auth GET /v1/auth/me. A valid token that auth rejects returns 401;
+    if auth is unavailable, biz returns 503 AUTH_UNAVAILABLE.
 servers:
   - url: http://127.0.0.1:8080
 security:
@@ -602,7 +606,7 @@ components:
                 properties:
                   code:
                     type: string
-                    enum: [BAD_REQUEST, UNAUTHENTICATED, INVALID_CREDENTIALS, FORBIDDEN, NOT_FOUND, CONFLICT, VERSION_CONFLICT, IDEMPOTENCY_MISMATCH, IDEMPOTENCY_IN_PROGRESS, IDEMPOTENCY_KEY_REQUIRED, EMAIL_TAKEN, INVITE_INVALID, REGISTRATION_CLOSED, ACCOUNT_LOCKED, RATE_LIMITED, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, VALIDATION_FAILED, INTERNAL, UNAVAILABLE]
+                    enum: [BAD_REQUEST, UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, CONFLICT, VERSION_CONFLICT, IDEMPOTENCY_MISMATCH, IDEMPOTENCY_IN_PROGRESS, IDEMPOTENCY_KEY_REQUIRED, AUTH_UNAVAILABLE, PAYLOAD_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, VALIDATION_FAILED, INTERNAL, UNAVAILABLE]
                   message:
                     type: string
                   details: {}

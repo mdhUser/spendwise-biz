@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -12,11 +11,8 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"github.com/google/uuid"
+	"github.com/mdhuser/spendwise-biz/internal/authclient"
 	"github.com/mdhuser/spendwise-biz/internal/httpserver"
-	identityapp "github.com/mdhuser/spendwise-biz/internal/identity/app"
-	identityhttp "github.com/mdhuser/spendwise-biz/internal/identity/http"
-	identitymysql "github.com/mdhuser/spendwise-biz/internal/identity/store/mysql"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	ledgerhttp "github.com/mdhuser/spendwise-biz/internal/ledger/http"
 	ledgermysql "github.com/mdhuser/spendwise-biz/internal/ledger/store/mysql"
@@ -40,24 +36,15 @@ func main() {
 	}
 	defer database.Close()
 
-	identityStore := identitymysql.New(database)
-	identityService := identityapp.New(database, identityStore, cfg)
 	ledgerStore := ledgermysql.New(database)
 	ledgerService := ledgerapp.New(database, ledgerStore, cfg)
-
-	identityService.SetDefaults(func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
-		return ledgerService.EnsureDefaultsTx(ctx, tx, userID)
-	})
-	identityHandler := identityhttp.New(identityService)
-	identityHandler.SetPurge(func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
-		return ledgerService.PurgeUser(ctx, tx, userID)
-	})
 	ledgerHandler := ledgerhttp.New(ledgerService, cfg.Location())
+	authClient := authclient.New(cfg.AuthBaseURL, cfg.AuthTimeout)
 
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpserver.New(
-			database, logger, identityService, ledgerService, identityHandler, ledgerHandler,
+			database, logger, ledgerService, ledgerHandler, authClient,
 			httpserver.Config{RequestTimeout: cfg.RequestTimeout, Timezone: cfg.Location()},
 		).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -80,7 +67,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("server_started", "addr", cfg.HTTPAddr)
+	logger.Info("server_started", "addr", cfg.HTTPAddr, "auth_base_url", cfg.AuthBaseURL)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server_error", "error", err)
 		os.Exit(1)

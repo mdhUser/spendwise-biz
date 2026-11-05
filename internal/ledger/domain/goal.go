@@ -25,7 +25,7 @@ const (
 
 type SavingGoal struct {
 	ID          uuid.UUID
-	OwnerID     uuid.UUID
+	OwnerID     string
 	Name        string
 	Status      string
 	StartPeriod Period
@@ -44,7 +44,7 @@ type Scope struct {
 type GoalTerm struct {
 	ID                  uuid.UUID
 	GoalID              uuid.UUID
-	OwnerID             uuid.UUID
+	OwnerID             string
 	Version             int
 	EffectiveFromPeriod Period
 	ScopeKind           string

@@ -16,11 +16,8 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/google/uuid"
+	"github.com/mdhuser/spendwise-biz/internal/authclient"
 	"github.com/mdhuser/spendwise-biz/internal/httpserver"
-	identityapp "github.com/mdhuser/spendwise-biz/internal/identity/app"
-	identityhttp "github.com/mdhuser/spendwise-biz/internal/identity/http"
-	identitymysql "github.com/mdhuser/spendwise-biz/internal/identity/store/mysql"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	ledgerhttp "github.com/mdhuser/spendwise-biz/internal/ledger/http"
 	ledgermysql "github.com/mdhuser/spendwise-biz/internal/ledger/store/mysql"
@@ -29,10 +26,13 @@ import (
 	"github.com/mdhuser/spendwise-biz/internal/platform/migrate"
 )
 
-// TestMySQLIntegration exercises the real HTTP stack against a real MySQL
-// database, starting from a fresh migration run. It only runs when
-// BIZ_TEST_MYSQL_DSN is set, and it refuses databases whose name does not
-// contain "test" so a mistyped DSN cannot touch a shared database.
+// TestMySQLIntegration exercises the real HTTP stack and ledger schema against
+// a real MySQL database. Identity is provided by an httptest fake of
+// spendwise-auth's GET /v1/auth/me, so the test proves biz never depends on the
+// auth service's users/sessions tables.
+//
+// It only runs when BIZ_TEST_MYSQL_DSN is set and refuses databases whose name
+// does not contain "test" so a mistyped DSN cannot touch a shared database.
 func TestMySQLIntegration(t *testing.T) {
 	dsn := strings.TrimSpace(os.Getenv("BIZ_TEST_MYSQL_DSN"))
 	if dsn == "" {
@@ -46,10 +46,45 @@ func TestMySQLIntegration(t *testing.T) {
 		t.Fatalf("refusing to run integration test against database %q: name must contain \"test\"", dsnCfg.DBName)
 	}
 
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	userA := "it-user-a-" + suffix
+	userB := "it-user-b-" + suffix
+	tokens := map[string]string{"token-a": userA, "token-b": userB}
+
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/me" {
+			http.NotFound(w, r)
+			return
+		}
+		token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		switch token {
+		case "auth-error":
+			http.Error(w, "auth unavailable", http.StatusInternalServerError)
+			return
+		case "auth-slow":
+			time.Sleep(300 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"user":{"id":"slow-user","status":"active"}}`))
+			return
+		}
+		userID, ok := tokens[token]
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"authentication required"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"user": map[string]any{"id": userID, "status": "active"},
+		})
+	}))
+	t.Cleanup(fakeAuth.Close)
+
 	t.Setenv("BIZ_MYSQL_DSN", dsn)
 	t.Setenv("BIZ_MIGRATION_DSN", dsn)
-	t.Setenv("BIZ_INVITE_PEPPER", strings.Repeat("integration-test-pepper-", 3))
-	t.Setenv("BIZ_REGISTRATION_MODE", "invite")
+	t.Setenv("BIZ_AUTH_BASE_URL", fakeAuth.URL)
+	t.Setenv("BIZ_AUTH_TIMEOUT", "100ms")
 	t.Setenv("BIZ_HTTP_ADDR", "127.0.0.1:0")
 
 	cfg, err := config.Load()
@@ -70,12 +105,10 @@ func TestMySQLIntegration(t *testing.T) {
 		}
 	})
 
-	// 1. Migrations: identity then ledger.
 	if err := migrate.Apply(ctx, database); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 	for _, table := range []string{
-		"users", "sessions", "invites",
 		"accounts", "categories", "transactions", "idempotency_records", "audit_events",
 		"saving_goals", "saving_goal_terms", "saving_goal_term_categories",
 	} {
@@ -87,24 +120,49 @@ func TestMySQLIntegration(t *testing.T) {
 			t.Fatalf("table %q not found after migration: %v", table, err)
 		}
 	}
+	for _, check := range []struct{ table, column string }{
+		{"accounts", "owner_id"},
+		{"categories", "owner_id"},
+		{"transactions", "owner_id"},
+		{"idempotency_records", "owner_id"},
+		{"audit_events", "owner_id"},
+		{"audit_events", "actor_user_id"},
+		{"saving_goals", "owner_id"},
+		{"saving_goal_terms", "owner_id"},
+		{"saving_goal_term_categories", "owner_id"},
+	} {
+		var dataType, columnType string
+		if err := database.QueryRowContext(ctx, `
+			SELECT DATA_TYPE, COLUMN_TYPE FROM information_schema.columns
+			WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+			check.table, check.column).Scan(&dataType, &columnType); err != nil {
+			t.Fatalf("inspect %s.%s: %v", check.table, check.column, err)
+		}
+		if dataType != "varchar" || !strings.Contains(columnType, "191") {
+			t.Fatalf("%s.%s = %s, want varchar(191)", check.table, check.column, columnType)
+		}
+	}
+	var userFKCount int
+	if err := database.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.key_column_usage
+		WHERE table_schema = DATABASE() AND referenced_table_name = 'users'
+		  AND table_name IN ('accounts','categories','transactions','idempotency_records',
+		                     'audit_events','saving_goals','saving_goal_terms','saving_goal_term_categories')`,
+	).Scan(&userFKCount); err != nil {
+		t.Fatalf("inspect users foreign keys: %v", err)
+	}
+	if userFKCount != 0 {
+		t.Fatalf("ledger tables have %d foreign keys to auth users; want 0", userFKCount)
+	}
 
-	identityStore := identitymysql.New(database)
-	identityService := identityapp.New(database, identityStore, cfg)
 	ledgerStore := ledgermysql.New(database)
 	ledgerService := ledgerapp.New(database, ledgerStore, cfg)
-
-	identityService.SetDefaults(func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
-		return ledgerService.EnsureDefaultsTx(ctx, tx, userID)
-	})
-	identityHandler := identityhttp.New(identityService)
-	identityHandler.SetPurge(func(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
-		return ledgerService.PurgeUser(ctx, tx, userID)
-	})
 	ledgerHandler := ledgerhttp.New(ledgerService, cfg.Location())
+	authClient := authclient.New(cfg.AuthBaseURL, cfg.AuthTimeout)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server := httptest.NewServer(httpserver.New(
-		database, logger, identityService, ledgerService, identityHandler, ledgerHandler,
+		database, logger, ledgerService, ledgerHandler, authClient,
 		httpserver.Config{RequestTimeout: cfg.RequestTimeout, Timezone: cfg.Location()},
 	).Handler())
 	t.Cleanup(server.Close)
@@ -112,60 +170,28 @@ func TestMySQLIntegration(t *testing.T) {
 	client := server.Client()
 	client.Timeout = 20 * time.Second
 
-	// Cleanup state is populated as users/invites are created. Cleanup runs
-	// before the database is closed (LIFO) and only touches the IDs this test
-	// created, in foreign-key dependency order.
-	var createdUsers []uuid.UUID
-	var createdInvites []uuid.UUID
-	t.Cleanup(func() { cleanupTestData(t, database, createdUsers, createdInvites) })
+	t.Cleanup(func() { cleanupTestData(t, database, []string{userA, userB}) })
 
-	newInvite := func(t *testing.T) string {
-		t.Helper()
-		code, invite, err := identityService.CreateInvite(ctx, 5, time.Hour)
-		if err != nil {
-			t.Fatalf("create invite: %v", err)
-		}
-		createdInvites = append(createdInvites, invite.ID)
-		return code
-	}
+	// 1. Auth failures map to 401/503, not to ledger errors.
+	status, _, body := doJSON(t, client, http.MethodGet, server.URL+"/v1/ledger/accounts", "", "", nil)
+	requireStatus(t, status, http.StatusUnauthorized, body)
+	requireErrorCode(t, body, "UNAUTHENTICATED")
 
-	register := func(t *testing.T, email, password, inviteCode string) string {
-		t.Helper()
-		status, _, body := doJSON(t, client, http.MethodPost, server.URL+"/v1/auth/register", "", "", map[string]any{
-			"email": email, "password": password, "displayName": "集成测试", "inviteCode": inviteCode,
-		})
-		requireStatus(t, status, http.StatusCreated, body)
-		var resp authResponse
-		decodeJSON(t, body, &resp)
-		userID, err := uuid.Parse(resp.User.ID)
-		if err != nil {
-			t.Fatalf("parse registered user id %q: %v", resp.User.ID, err)
-		}
-		if resp.Token == "" {
-			t.Fatal("register returned an empty token")
-		}
-		createdUsers = append(createdUsers, userID)
-		return resp.Token
-	}
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/ledger/accounts", "invalid-token", "", nil)
+	requireStatus(t, status, http.StatusUnauthorized, body)
 
-	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	password := "correct horse battery staple"
-	emailA := "it-a-" + suffix + "@example.com"
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/ledger/accounts", "auth-error", "", nil)
+	requireStatus(t, status, http.StatusServiceUnavailable, body)
+	requireErrorCode(t, body, "AUTH_UNAVAILABLE")
 
-	// 2. Invite -> register -> login.
-	register(t, emailA, password, newInvite(t))
-	status, _, body := doJSON(t, client, http.MethodPost, server.URL+"/v1/auth/login", "", "", map[string]any{
-		"email": emailA, "password": password,
-	})
-	requireStatus(t, status, http.StatusOK, body)
-	var login authResponse
-	decodeJSON(t, body, &login)
-	if login.Token == "" {
-		t.Fatal("login returned an empty token")
-	}
-	tokenA := login.Token
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/ledger/accounts", "auth-slow", "", nil)
+	requireStatus(t, status, http.StatusServiceUnavailable, body)
+	requireErrorCode(t, body, "AUTH_UNAVAILABLE")
 
-	// 3. Account and category.
+	tokenA := "token-a"
+	tokenB := "token-b"
+
+	// 2. Account and category.
 	accountName := "集成测试账户-" + suffix
 	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/ledger/accounts", tokenA, "it-account-"+suffix, map[string]any{
 		"name": accountName, "kind": "cash",
@@ -190,7 +216,7 @@ func TestMySQLIntegration(t *testing.T) {
 		t.Fatal("category id is empty")
 	}
 
-	// 4. Transaction + idempotent replay + mismatch.
+	// 3. Transaction + idempotent replay + mismatch.
 	occurredAt := time.Now().In(cfg.Location()).Format(time.RFC3339)
 	txKey := "it-tx-" + suffix
 	txPayload := map[string]any{
@@ -227,7 +253,7 @@ func TestMySQLIntegration(t *testing.T) {
 	requireStatus(t, status, http.StatusConflict, body)
 	requireErrorCode(t, body, "IDEMPOTENCY_MISMATCH")
 
-	// 5. Fixed-baseline saving goal + achievements table.
+	// 4. Fixed-baseline saving goal + achievements table.
 	period := time.Now().In(cfg.Location()).Format("2006-01")
 	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/ledger/saving-goals", tokenA, "it-goal-"+suffix, map[string]any{
 		"name": "每月少花 500 元", "startPeriod": period,
@@ -287,7 +313,7 @@ func TestMySQLIntegration(t *testing.T) {
 		t.Errorf("status = %q, want in_progress", row.Status)
 	}
 
-	// 6. Optimistic locking: successful update, then stale version conflict.
+	// 5. Optimistic locking: successful update, then stale version conflict.
 	status, _, body = doJSON(t, client, http.MethodPatch, server.URL+"/v1/ledger/accounts/"+accountID, tokenA, "", map[string]any{
 		"name": accountName + "-v2", "version": 1,
 	})
@@ -304,10 +330,7 @@ func TestMySQLIntegration(t *testing.T) {
 	requireStatus(t, status, http.StatusConflict, body)
 	requireErrorCode(t, body, "VERSION_CONFLICT")
 
-	// 7. Cross-user isolation: user B can neither read nor mutate A's data.
-	emailB := "it-b-" + suffix + "@example.com"
-	tokenB := register(t, emailB, password, newInvite(t))
-
+	// 6. Cross-user isolation: user B can neither read nor mutate A's data.
 	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/ledger/transactions/"+transactionID, tokenB, "", nil)
 	requireStatus(t, status, http.StatusNotFound, body)
 	requireErrorCode(t, body, "NOT_FOUND")
@@ -327,13 +350,6 @@ func TestMySQLIntegration(t *testing.T) {
 	if len(list.Items) != 0 {
 		t.Fatalf("user B transaction list has %d items, want 0", len(list.Items))
 	}
-}
-
-type authResponse struct {
-	User struct {
-		ID string `json:"id"`
-	} `json:"user"`
-	Token string `json:"token"`
 }
 
 type idResponse struct {
@@ -418,10 +434,9 @@ func requireErrorCode(t *testing.T, body []byte, want string) {
 	}
 }
 
-// cleanupTestData removes only the users and invites created by this test, in
-// foreign-key dependency order. Users are deleted last because most ledger
-// tables reference them with ON DELETE RESTRICT.
-func cleanupTestData(t *testing.T, database *sql.DB, userIDs, inviteIDs []uuid.UUID) {
+// cleanupTestData removes only the ledger rows created by this test. Auth
+// users/sessions are owned by spendwise-auth and are deliberately untouched.
+func cleanupTestData(t *testing.T, database *sql.DB, ownerIDs []string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -436,26 +451,18 @@ func cleanupTestData(t *testing.T, database *sql.DB, userIDs, inviteIDs []uuid.U
 		{`DELETE FROM transactions WHERE owner_id = ?`, 1},
 		{`DELETE FROM categories WHERE owner_id = ?`, 1},
 		{`DELETE FROM accounts WHERE owner_id = ?`, 1},
-		{`DELETE FROM sessions WHERE user_id = ?`, 1},
 		{`DELETE FROM idempotency_records WHERE owner_id = ?`, 1},
 		{`DELETE FROM audit_events WHERE owner_id = ? OR actor_user_id = ?`, 2},
-		{`DELETE FROM users WHERE id = ?`, 1},
 	}
-	for _, userID := range userIDs {
-		id := db.UUIDBytes(userID)
+	for _, ownerID := range ownerIDs {
 		for _, step := range steps {
-			args := []any{id}
+			args := []any{ownerID}
 			if step.args == 2 {
-				args = append(args, id)
+				args = append(args, ownerID)
 			}
 			if _, err := database.ExecContext(ctx, step.query, args...); err != nil {
-				t.Errorf("cleanup %q for user %s: %v", step.query, userID, err)
+				t.Errorf("cleanup %q for owner %s: %v", step.query, ownerID, err)
 			}
-		}
-	}
-	for _, inviteID := range inviteIDs {
-		if _, err := database.ExecContext(ctx, `DELETE FROM invites WHERE id = ?`, db.UUIDBytes(inviteID)); err != nil {
-			t.Errorf("cleanup invite %s: %v", inviteID, err)
 		}
 	}
 }

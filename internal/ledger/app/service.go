@@ -29,19 +29,11 @@ func New(database *sql.DB, store *ledgerstore.Store, cfg *config.Config) *Servic
 	return &Service{db: database, store: store, cfg: cfg, loc: cfg.Location()}
 }
 
-func (s *Service) EnsureDefaults(ctx context.Context, ownerID uuid.UUID) error {
+func (s *Service) EnsureDefaults(ctx context.Context, ownerID string) error {
 	return s.store.EnsureDefaults(ctx, s.db, ownerID, time.Now().UTC())
 }
 
-func (s *Service) EnsureDefaultsTx(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID) error {
-	return s.store.EnsureDefaults(ctx, tx, ownerID, time.Now().UTC())
-}
-
-func (s *Service) PurgeUser(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID) error {
-	return s.store.PurgeUser(ctx, tx, ownerID)
-}
-
-func (s *Service) idempotent(ctx context.Context, ownerID uuid.UUID, key, scope string, payload any, fn func(*sql.Tx) (any, *uuid.UUID, error)) (any, bool, error) {
+func (s *Service) idempotent(ctx context.Context, ownerID string, key, scope string, payload any, fn func(*sql.Tx) (any, *uuid.UUID, error)) (any, bool, error) {
 	if len(key) < 8 || len(key) > 128 {
 		return nil, false, apperr.New(400, "IDEMPOTENCY_KEY_REQUIRED", "必须提供 8-128 字符的 Idempotency-Key")
 	}
@@ -100,7 +92,7 @@ type UpdateAccountInput struct {
 	Version  int     `json:"version"`
 }
 
-func (s *Service) ListAccounts(ctx context.Context, ownerID uuid.UUID, includeArchived bool) (any, error) {
+func (s *Service) ListAccounts(ctx context.Context, ownerID string, includeArchived bool) (any, error) {
 	items, err := s.store.ListAccounts(ctx, ownerID, includeArchived)
 	if err != nil {
 		return nil, err
@@ -112,7 +104,7 @@ func (s *Service) ListAccounts(ctx context.Context, ownerID uuid.UUID, includeAr
 	return out, nil
 }
 
-func (s *Service) CreateAccount(ctx context.Context, ownerID, actorID uuid.UUID, requestID, key string, input CreateAccountInput) (any, bool, error) {
+func (s *Service) CreateAccount(ctx context.Context, ownerID, actorID string, requestID, key string, input CreateAccountInput) (any, bool, error) {
 	name := strings.TrimSpace(input.Name)
 	if len([]rune(name)) < 1 || len([]rune(name)) > 40 {
 		return nil, false, apperr.Validation("账户名称长度必须在 1-40 个字符之间")
@@ -143,7 +135,7 @@ func (s *Service) CreateAccount(ctx context.Context, ownerID, actorID uuid.UUID,
 	return body, replay, err
 }
 
-func (s *Service) UpdateAccount(ctx context.Context, ownerID, actorID, accountID uuid.UUID, requestID string, input UpdateAccountInput) (any, error) {
+func (s *Service) UpdateAccount(ctx context.Context, ownerID, actorID string, accountID uuid.UUID, requestID string, input UpdateAccountInput) (any, error) {
 	account, err := s.store.GetAccount(ctx, ownerID, accountID)
 	if err != nil {
 		return nil, apperr.NotFound("账户不存在")
@@ -198,7 +190,7 @@ func (s *Service) UpdateAccount(ctx context.Context, ownerID, actorID, accountID
 	return accountView(account), nil
 }
 
-func (s *Service) ArchiveAccount(ctx context.Context, ownerID, actorID, accountID uuid.UUID, requestID string) error {
+func (s *Service) ArchiveAccount(ctx context.Context, ownerID, actorID string, accountID uuid.UUID, requestID string) error {
 	now := time.Now().UTC()
 	return db.WithTx(ctx, s.db, nil, func(tx *sql.Tx) error {
 		if err := s.store.ArchiveAccount(ctx, tx, ownerID, accountID, now); err != nil {
@@ -248,7 +240,7 @@ type UpdateCategoryInput struct {
 	Version   int     `json:"version"`
 }
 
-func (s *Service) ListCategories(ctx context.Context, ownerID uuid.UUID, kind string, includeArchived bool) (any, error) {
+func (s *Service) ListCategories(ctx context.Context, ownerID string, kind string, includeArchived bool) (any, error) {
 	items, err := s.store.ListCategories(ctx, ownerID, kind, includeArchived)
 	if err != nil {
 		return nil, err
@@ -260,7 +252,7 @@ func (s *Service) ListCategories(ctx context.Context, ownerID uuid.UUID, kind st
 	return out, nil
 }
 
-func (s *Service) CreateCategory(ctx context.Context, ownerID, actorID uuid.UUID, requestID, key string, input CreateCategoryInput) (any, bool, error) {
+func (s *Service) CreateCategory(ctx context.Context, ownerID, actorID string, requestID, key string, input CreateCategoryInput) (any, bool, error) {
 	name := strings.TrimSpace(input.Name)
 	if len([]rune(name)) < 1 || len([]rune(name)) > 40 {
 		return nil, false, apperr.Validation("分类名称长度必须在 1-40 个字符之间")
@@ -295,7 +287,7 @@ func (s *Service) CreateCategory(ctx context.Context, ownerID, actorID uuid.UUID
 	return body, replay, err
 }
 
-func (s *Service) UpdateCategory(ctx context.Context, ownerID, actorID, categoryID uuid.UUID, requestID string, input UpdateCategoryInput) (any, error) {
+func (s *Service) UpdateCategory(ctx context.Context, ownerID, actorID string, categoryID uuid.UUID, requestID string, input UpdateCategoryInput) (any, error) {
 	category, err := s.store.GetCategory(ctx, ownerID, categoryID)
 	if err != nil {
 		return nil, apperr.NotFound("分类不存在")
@@ -364,7 +356,7 @@ func (s *Service) UpdateCategory(ctx context.Context, ownerID, actorID, category
 	return categoryView(category), nil
 }
 
-func (s *Service) ArchiveCategory(ctx context.Context, ownerID, actorID, categoryID uuid.UUID, requestID string) error {
+func (s *Service) ArchiveCategory(ctx context.Context, ownerID, actorID string, categoryID uuid.UUID, requestID string) error {
 	now := time.Now().UTC()
 	return db.WithTx(ctx, s.db, nil, func(tx *sql.Tx) error {
 		if err := s.store.ArchiveCategory(ctx, tx, ownerID, categoryID, now); err != nil {

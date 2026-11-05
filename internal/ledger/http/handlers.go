@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mdhuser/spendwise-biz/internal/identity"
+	"github.com/mdhuser/spendwise-biz/internal/authclient"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	"github.com/mdhuser/spendwise-biz/internal/ledger/domain"
 	"github.com/mdhuser/spendwise-biz/internal/platform/httpx"
@@ -51,8 +51,8 @@ func (h *Handler) Register(mux *http.ServeMux, auth func(http.Handler) http.Hand
 	mux.Handle("GET /v1/ledger/saving-goals/{id}/achievements", auth(http.HandlerFunc(h.achievements)))
 }
 
-func principal(r *http.Request) (identity.Principal, bool) {
-	return identity.PrincipalFromContext(r.Context())
+func principal(r *http.Request) (authclient.User, bool) {
+	return authclient.UserFromContext(r.Context())
 }
 
 func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +61,7 @@ func (h *Handler) listAccounts(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.New(http.StatusUnauthorized, "UNAUTHENTICATED", "请先登录"))
 		return
 	}
-	body, err := h.service.ListAccounts(r.Context(), p.User.ID, boolQuery(r, "includeArchived"))
+	body, err := h.service.ListAccounts(r.Context(), p.ID, boolQuery(r, "includeArchived"))
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -80,7 +80,7 @@ func (h *Handler) createAccount(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, replay, err := h.service.CreateAccount(r.Context(), p.User.ID, p.User.ID, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
+	body, replay, err := h.service.CreateAccount(r.Context(), p.ID, p.ID, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -103,7 +103,7 @@ func (h *Handler) updateAccount(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, err := h.service.UpdateAccount(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context()), input)
+	body, err := h.service.UpdateAccount(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context()), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -121,7 +121,7 @@ func (h *Handler) archiveAccount(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.service.ArchiveAccount(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context())); err != nil {
+	if err := h.service.ArchiveAccount(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context())); err != nil {
 		httpx.WriteError(w, r, err)
 		return
 	}
@@ -134,7 +134,7 @@ func (h *Handler) listCategories(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.New(http.StatusUnauthorized, "UNAUTHENTICATED", "请先登录"))
 		return
 	}
-	body, err := h.service.ListCategories(r.Context(), p.User.ID, r.URL.Query().Get("kind"), boolQuery(r, "includeArchived"))
+	body, err := h.service.ListCategories(r.Context(), p.ID, r.URL.Query().Get("kind"), boolQuery(r, "includeArchived"))
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -153,7 +153,7 @@ func (h *Handler) createCategory(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, replay, err := h.service.CreateCategory(r.Context(), p.User.ID, p.User.ID, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
+	body, replay, err := h.service.CreateCategory(r.Context(), p.ID, p.ID, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -176,7 +176,7 @@ func (h *Handler) updateCategory(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, err := h.service.UpdateCategory(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context()), input)
+	body, err := h.service.UpdateCategory(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context()), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -194,7 +194,7 @@ func (h *Handler) archiveCategory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.service.ArchiveCategory(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context())); err != nil {
+	if err := h.service.ArchiveCategory(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context())); err != nil {
 		httpx.WriteError(w, r, err)
 		return
 	}
@@ -234,7 +234,7 @@ func (h *Handler) listTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 	filter.Query = strings.TrimSpace(r.URL.Query().Get("q"))
 	filter.Cursor = r.URL.Query().Get("cursor")
-	body, err := h.service.ListTransactions(r.Context(), p.User.ID, filter)
+	body, err := h.service.ListTransactions(r.Context(), p.ID, filter)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -253,7 +253,7 @@ func (h *Handler) createTransaction(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, replay, err := h.service.CreateTransaction(r.Context(), p.User.ID, p.User.ID, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
+	body, replay, err := h.service.CreateTransaction(r.Context(), p.ID, p.ID, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -271,7 +271,7 @@ func (h *Handler) getTransaction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := h.service.GetTransaction(r.Context(), p.User.ID, id)
+	body, err := h.service.GetTransaction(r.Context(), p.ID, id)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -294,7 +294,7 @@ func (h *Handler) updateTransaction(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, err := h.service.UpdateTransaction(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context()), input)
+	body, err := h.service.UpdateTransaction(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context()), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -312,7 +312,7 @@ func (h *Handler) deleteTransaction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.service.DeleteTransaction(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context())); err != nil {
+	if err := h.service.DeleteTransaction(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context())); err != nil {
 		httpx.WriteError(w, r, err)
 		return
 	}
@@ -329,7 +329,7 @@ func (h *Handler) restoreTransaction(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.service.RestoreTransaction(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context())); err != nil {
+	if err := h.service.RestoreTransaction(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context())); err != nil {
 		httpx.WriteError(w, r, err)
 		return
 	}
@@ -355,7 +355,7 @@ func (h *Handler) summary(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.New(422, "VALIDATION_FAILED", "groupBy 必须是 category/month/day"))
 		return
 	}
-	body, err := h.service.Summary(r.Context(), p.User.ID, from, to, groupBy)
+	body, err := h.service.Summary(r.Context(), p.ID, from, to, groupBy)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -369,7 +369,7 @@ func (h *Handler) listGoals(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, httpx.New(http.StatusUnauthorized, "UNAUTHENTICATED", "请先登录"))
 		return
 	}
-	body, err := h.service.ListGoals(r.Context(), p.User.ID, r.URL.Query().Get("status"), r.URL.Query().Get("cursor"), limitQuery(r))
+	body, err := h.service.ListGoals(r.Context(), p.ID, r.URL.Query().Get("status"), r.URL.Query().Get("cursor"), limitQuery(r))
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -388,7 +388,7 @@ func (h *Handler) createGoal(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, replay, err := h.service.CreateGoal(r.Context(), p.User.ID, p.User.ID, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
+	body, replay, err := h.service.CreateGoal(r.Context(), p.ID, p.ID, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -406,7 +406,7 @@ func (h *Handler) getGoal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := h.service.GetGoal(r.Context(), p.User.ID, id)
+	body, err := h.service.GetGoal(r.Context(), p.ID, id)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -429,7 +429,7 @@ func (h *Handler) updateGoal(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, err := h.service.UpdateGoal(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context()), input)
+	body, err := h.service.UpdateGoal(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context()), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -447,7 +447,7 @@ func (h *Handler) archiveGoal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := h.service.ArchiveGoal(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context())); err != nil {
+	if err := h.service.ArchiveGoal(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context())); err != nil {
 		httpx.WriteError(w, r, err)
 		return
 	}
@@ -469,7 +469,7 @@ func (h *Handler) addTerm(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, replay, err := h.service.AddTerm(r.Context(), p.User.ID, p.User.ID, id, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
+	body, replay, err := h.service.AddTerm(r.Context(), p.ID, p.ID, id, httpx.RequestID(r.Context()), r.Header.Get("Idempotency-Key"), input)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -492,7 +492,7 @@ func (h *Handler) achievements(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, err := h.service.Achievements(r.Context(), p.User.ID, id, from, to, boolQueryDefault(r, "includeProjection", true))
+	body, err := h.service.Achievements(r.Context(), p.ID, id, from, to, boolQueryDefault(r, "includeProjection", true))
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return
@@ -511,7 +511,7 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, err)
 		return
 	}
-	body, err := h.service.Overview(r.Context(), p.User.ID, period)
+	body, err := h.service.Overview(r.Context(), p.ID, period)
 	if err != nil {
 		httpx.WriteError(w, r, err)
 		return

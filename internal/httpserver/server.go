@@ -3,15 +3,15 @@ package httpserver
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mdhuser/spendwise-biz/internal/identity"
-	identityapp "github.com/mdhuser/spendwise-biz/internal/identity/app"
-	identityhttp "github.com/mdhuser/spendwise-biz/internal/identity/http"
+	"github.com/mdhuser/spendwise-biz/internal/authclient"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	ledgerhttp "github.com/mdhuser/spendwise-biz/internal/ledger/http"
 	"github.com/mdhuser/spendwise-biz/internal/platform/apperr"
@@ -19,12 +19,13 @@ import (
 )
 
 type Server struct {
-	cfg             Config
-	db              *sql.DB
-	logger          *slog.Logger
-	identityService *identityapp.Service
-	identityHandler *identityhttp.Handler
-	ledgerHandler   *ledgerhttp.Handler
+	cfg           Config
+	db            *sql.DB
+	logger        *slog.Logger
+	ledgerService *ledgerapp.Service
+	ledgerHandler *ledgerhttp.Handler
+	authClient    *authclient.Client
+	defaultsReady sync.Map
 }
 
 type Config struct {
@@ -32,11 +33,11 @@ type Config struct {
 	Timezone       *time.Location
 }
 
-func New(database *sql.DB, logger *slog.Logger, identityService *identityapp.Service, ledgerService *ledgerapp.Service,
-	identityHandler *identityhttp.Handler, ledgerHandler *ledgerhttp.Handler, cfg Config) *Server {
+func New(database *sql.DB, logger *slog.Logger, ledgerService *ledgerapp.Service, ledgerHandler *ledgerhttp.Handler,
+	authClient *authclient.Client, cfg Config) *Server {
 	return &Server{
 		cfg: cfg, db: database, logger: logger,
-		identityService: identityService, identityHandler: identityHandler, ledgerHandler: ledgerHandler,
+		ledgerService: ledgerService, ledgerHandler: ledgerHandler, authClient: authClient,
 	}
 }
 
@@ -63,9 +64,7 @@ func (s *Server) Handler() http.Handler {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	auth := s.requireAuth
-	s.identityHandler.Register(mux, auth)
-	s.ledgerHandler.Register(mux, auth)
+	s.ledgerHandler.Register(mux, s.requireAuth)
 
 	var handler http.Handler = mux
 	handler = s.recover(handler)
@@ -77,21 +76,45 @@ func (s *Server) Handler() http.Handler {
 	return handler
 }
 
+// requireAuth introspects the bearer token with spendwise-auth. The auth
+// service is the only identity provider: biz never reads auth users/sessions
+// tables. A rejected token becomes 401; any auth transport/5xx failure becomes
+// 503 so clients can distinguish "log in again" from "try again later".
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") {
+		header := strings.TrimSpace(r.Header.Get("Authorization"))
+		if len(header) < 7 || !strings.EqualFold(header[:6], "Bearer") || header[6] != ' ' {
 			httpx.WriteError(w, r, apperr.Unauthenticated("请先登录"))
 			return
 		}
-		raw := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-		principal, err := s.identityService.Authenticate(r.Context(), raw)
+		token := strings.TrimSpace(header[7:])
+		user, err := s.authClient.Authenticate(r.Context(), token)
 		if err != nil {
-			httpx.WriteError(w, r, apperr.Unauthenticated("登录已失效，请重新登录"))
+			if errors.Is(err, authclient.ErrUnauthenticated) {
+				httpx.WriteError(w, r, apperr.Unauthenticated("登录已失效，请重新登录"))
+				return
+			}
+			s.logger.Warn("auth_unavailable", "request_id", httpx.RequestID(r.Context()), "error", err)
+			httpx.WriteError(w, r, apperr.New(http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "认证服务暂时不可用，请稍后再试"))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(identity.WithPrincipal(r.Context(), *principal)))
+		s.ensureDefaults(r.Context(), user.ID)
+		next.ServeHTTP(w, r.WithContext(authclient.WithUser(r.Context(), user)))
 	})
+}
+
+// ensureDefaults creates the starter accounts/categories once per user per
+// process. It is best effort: a failure is logged and retried on the next
+// request, but it never turns an otherwise valid login into an error.
+func (s *Server) ensureDefaults(ctx context.Context, ownerID string) {
+	if _, ok := s.defaultsReady.Load(ownerID); ok {
+		return
+	}
+	if err := s.ledgerService.EnsureDefaults(ctx, ownerID); err != nil {
+		s.logger.Warn("ensure_defaults_failed", "owner_id", ownerID, "error", err)
+		return
+	}
+	s.defaultsReady.Store(ownerID, struct{}{})
 }
 
 func (s *Server) requestID(next http.Handler) http.Handler {

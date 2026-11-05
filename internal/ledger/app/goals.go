@@ -49,7 +49,7 @@ type AddTermInput struct {
 	TargetSavingFen     int64             `json:"targetSavingFen"`
 }
 
-func (s *Service) ListGoals(ctx context.Context, ownerID uuid.UUID, status, cursor string, limit int) (any, error) {
+func (s *Service) ListGoals(ctx context.Context, ownerID string, status, cursor string, limit int) (any, error) {
 	if status == "" {
 		status = domain.GoalActive
 	}
@@ -71,7 +71,7 @@ func (s *Service) ListGoals(ctx context.Context, ownerID uuid.UUID, status, curs
 	return map[string]any{"items": items, "nextCursor": nullableString(page.NextCursor)}, nil
 }
 
-func (s *Service) GetGoal(ctx context.Context, ownerID, goalID uuid.UUID) (any, error) {
+func (s *Service) GetGoal(ctx context.Context, ownerID string, goalID uuid.UUID) (any, error) {
 	goal, err := s.store.GetGoal(ctx, ownerID, goalID)
 	if err != nil {
 		return nil, apperr.NotFound("目标不存在")
@@ -83,7 +83,7 @@ func (s *Service) GetGoal(ctx context.Context, ownerID, goalID uuid.UUID) (any, 
 	return s.goalView(goal, terms), nil
 }
 
-func (s *Service) CreateGoal(ctx context.Context, ownerID, actorID uuid.UUID, requestID, key string, input CreateGoalInput) (any, bool, error) {
+func (s *Service) CreateGoal(ctx context.Context, ownerID, actorID string, requestID, key string, input CreateGoalInput) (any, bool, error) {
 	now := time.Now().UTC()
 	current := domain.PeriodFromTime(now, s.loc)
 	if input.StartPeriod == "" {
@@ -156,7 +156,7 @@ func (s *Service) CreateGoal(ctx context.Context, ownerID, actorID uuid.UUID, re
 	return body, replay, err
 }
 
-func (s *Service) UpdateGoal(ctx context.Context, ownerID, actorID, goalID uuid.UUID, requestID string, input UpdateGoalInput) (any, error) {
+func (s *Service) UpdateGoal(ctx context.Context, ownerID, actorID string, goalID uuid.UUID, requestID string, input UpdateGoalInput) (any, error) {
 	goal, err := s.store.GetGoal(ctx, ownerID, goalID)
 	if err != nil {
 		return nil, apperr.NotFound("目标不存在")
@@ -231,7 +231,7 @@ func (s *Service) UpdateGoal(ctx context.Context, ownerID, actorID, goalID uuid.
 	return s.goalView(goal, terms), nil
 }
 
-func (s *Service) AddTerm(ctx context.Context, ownerID, actorID, goalID uuid.UUID, requestID, key string, input AddTermInput) (any, bool, error) {
+func (s *Service) AddTerm(ctx context.Context, ownerID, actorID string, goalID uuid.UUID, requestID, key string, input AddTermInput) (any, bool, error) {
 	effective, err := domain.ParsePeriod(input.EffectiveFromPeriod)
 	if err != nil {
 		return nil, false, apperr.Validation("effectiveFromPeriod 必须是 YYYY-MM")
@@ -294,7 +294,7 @@ func (s *Service) AddTerm(ctx context.Context, ownerID, actorID, goalID uuid.UUI
 	return body, replay, err
 }
 
-func (s *Service) Achievements(ctx context.Context, ownerID, goalID uuid.UUID, from, to domain.Period, includeProjection bool) (any, error) {
+func (s *Service) Achievements(ctx context.Context, ownerID string, goalID uuid.UUID, from, to domain.Period, includeProjection bool) (any, error) {
 	now := time.Now().UTC()
 	current := domain.PeriodFromTime(now, s.loc)
 	if to.After(current) {
@@ -362,7 +362,7 @@ func (s *Service) Achievements(ctx context.Context, ownerID, goalID uuid.UUID, f
 	}, nil
 }
 
-func (s *Service) Overview(ctx context.Context, ownerID uuid.UUID, period domain.Period) (any, error) {
+func (s *Service) Overview(ctx context.Context, ownerID string, period domain.Period) (any, error) {
 	items := make([]any, 0)
 	now := time.Now().UTC()
 	current := domain.PeriodFromTime(now, s.loc)
@@ -411,7 +411,7 @@ func (s *Service) Overview(ctx context.Context, ownerID uuid.UUID, period domain
 	return map[string]any{"period": period.String(), "goals": items}, nil
 }
 
-func (s *Service) validateScope(ctx context.Context, ownerID uuid.UUID, input GoalScopeInput) (string, []uuid.UUID, error) {
+func (s *Service) validateScope(ctx context.Context, ownerID string, input GoalScopeInput) (string, []uuid.UUID, error) {
 	switch input.Kind {
 	case domain.ScopeAll:
 		if len(input.CategoryIDs) > 0 {
@@ -514,7 +514,7 @@ func nullablePeriodString(period *domain.Period) any {
 	return period.String()
 }
 
-func (s *Service) ArchiveGoal(ctx context.Context, ownerID, actorID, goalID uuid.UUID, requestID string) error {
+func (s *Service) ArchiveGoal(ctx context.Context, ownerID, actorID string, goalID uuid.UUID, requestID string) error {
 	goal, err := s.store.GetGoal(ctx, ownerID, goalID)
 	if err != nil {
 		return apperr.NotFound("目标不存在")

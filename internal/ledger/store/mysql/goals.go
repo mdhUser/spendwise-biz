@@ -33,33 +33,34 @@ func (s *Store) CreateGoal(ctx context.Context, q queryer, goal *domain.SavingGo
 		INSERT INTO saving_goals
 		(id, owner_id, name, status, start_period, end_period, version, archived_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		db.UUIDBytes(goal.ID), db.UUIDBytes(goal.OwnerID), goal.Name, goal.Status,
+		db.UUIDBytes(goal.ID), goal.OwnerID, goal.Name, goal.Status,
 		goal.StartPeriod.Start(time.UTC), nullablePeriod(goal.EndPeriod), goal.Version,
 		goal.ArchivedAt, goal.CreatedAt, goal.UpdatedAt)
 	return err
 }
 
-func (s *Store) GetGoal(ctx context.Context, ownerID, id uuid.UUID) (*domain.SavingGoal, error) {
+func (s *Store) GetGoal(ctx context.Context, ownerID string, id uuid.UUID) (*domain.SavingGoal, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, owner_id, name, status, start_period, end_period, version, archived_at,
 		       created_at, updated_at
 		FROM saving_goals WHERE id = ? AND owner_id = ?`,
-		db.UUIDBytes(id), db.UUIDBytes(ownerID))
+		db.UUIDBytes(id), ownerID)
 	return scanGoal(row)
 }
 
-func (s *Store) GetGoalForUpdate(ctx context.Context, tx *sql.Tx, ownerID, id uuid.UUID) (*domain.SavingGoal, error) {
+func (s *Store) GetGoalForUpdate(ctx context.Context, tx *sql.Tx, ownerID string, id uuid.UUID) (*domain.SavingGoal, error) {
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, owner_id, name, status, start_period, end_period, version, archived_at,
 		       created_at, updated_at
 		FROM saving_goals WHERE id = ? AND owner_id = ? FOR UPDATE`,
-		db.UUIDBytes(id), db.UUIDBytes(ownerID))
+		db.UUIDBytes(id), ownerID)
 	return scanGoal(row)
 }
 
 func scanGoal(row interface{ Scan(...any) error }) (*domain.SavingGoal, error) {
 	var goal domain.SavingGoal
-	var id, owner []byte
+	var id []byte
+	var owner string
 	var start time.Time
 	var end, archived sql.NullTime
 	if err := row.Scan(&id, &owner, &goal.Name, &goal.Status, &start,
@@ -73,9 +74,7 @@ func scanGoal(row interface{ Scan(...any) error }) (*domain.SavingGoal, error) {
 	if goal.ID, err = db.UUIDFromBytes(id); err != nil {
 		return nil, err
 	}
-	if goal.OwnerID, err = db.UUIDFromBytes(owner); err != nil {
-		return nil, err
-	}
+	goal.OwnerID = owner
 	goal.StartPeriod = domain.PeriodFromDate(start)
 	if end.Valid {
 		period := domain.PeriodFromDate(end.Time)
@@ -87,11 +86,11 @@ func scanGoal(row interface{ Scan(...any) error }) (*domain.SavingGoal, error) {
 	return &goal, nil
 }
 
-func (s *Store) ListGoals(ctx context.Context, ownerID uuid.UUID, status, cursor string, limit int) (GoalPage, error) {
+func (s *Store) ListGoals(ctx context.Context, ownerID string, status, cursor string, limit int) (GoalPage, error) {
 	query := `SELECT id, owner_id, name, status, start_period, end_period, version, archived_at,
 	                 created_at, updated_at
 	          FROM saving_goals WHERE owner_id = ?`
-	args := []any{db.UUIDBytes(ownerID)}
+	args := []any{ownerID}
 	if status != "" {
 		query += ` AND status = ?`
 		args = append(args, status)
@@ -146,7 +145,7 @@ func (s *Store) UpdateGoal(ctx context.Context, q queryer, goal *domain.SavingGo
 		    archived_at = ?, updated_at = ?
 		WHERE id = ? AND owner_id = ? AND version = ?`,
 		goal.Name, goal.Status, nullablePeriod(goal.EndPeriod), goal.ArchivedAt,
-		goal.UpdatedAt, db.UUIDBytes(goal.ID), db.UUIDBytes(goal.OwnerID), expectedVersion)
+		goal.UpdatedAt, db.UUIDBytes(goal.ID), goal.OwnerID, expectedVersion)
 	if err != nil {
 		return err
 	}
@@ -166,7 +165,7 @@ func (s *Store) InsertTerm(ctx context.Context, q queryer, term *domain.GoalTerm
 		(id, goal_id, owner_id, version, effective_from_period, scope_kind, baseline_kind,
 		 baseline_fen, initial_baseline_fen, target_saving_fen, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		db.UUIDBytes(term.ID), db.UUIDBytes(term.GoalID), db.UUIDBytes(term.OwnerID),
+		db.UUIDBytes(term.ID), db.UUIDBytes(term.GoalID), term.OwnerID,
 		term.Version, term.EffectiveFromPeriod.Start(time.UTC), term.ScopeKind,
 		term.BaselineKind, term.BaselineFen, term.InitialBaselineFen,
 		term.TargetSavingFen, term.CreatedAt)
@@ -177,20 +176,20 @@ func (s *Store) InsertTerm(ctx context.Context, q queryer, term *domain.GoalTerm
 		if _, err := q.ExecContext(ctx, `
 			INSERT INTO saving_goal_term_categories (term_id, owner_id, category_id)
 			VALUES (?, ?, ?)`,
-			db.UUIDBytes(term.ID), db.UUIDBytes(term.OwnerID), db.UUIDBytes(categoryID)); err != nil {
+			db.UUIDBytes(term.ID), term.OwnerID, db.UUIDBytes(categoryID)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Store) ListTerms(ctx context.Context, ownerID, goalID uuid.UUID) ([]domain.GoalTerm, error) {
+func (s *Store) ListTerms(ctx context.Context, ownerID string, goalID uuid.UUID) ([]domain.GoalTerm, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, goal_id, owner_id, version, effective_from_period, scope_kind,
 		       baseline_kind, baseline_fen, initial_baseline_fen, target_saving_fen, created_at
 		FROM saving_goal_terms
 		WHERE goal_id = ? AND owner_id = ?
-		ORDER BY version ASC`, db.UUIDBytes(goalID), db.UUIDBytes(ownerID))
+		ORDER BY version ASC`, db.UUIDBytes(goalID), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +223,8 @@ func (s *Store) MaxTermVersion(ctx context.Context, q queryer, goalID uuid.UUID)
 
 func scanTerm(row interface{ Scan(...any) error }) (*domain.GoalTerm, error) {
 	var term domain.GoalTerm
-	var id, goalID, owner []byte
+	var id, goalID []byte
+	var owner string
 	var effective time.Time
 	var baseline, initial sql.NullInt64
 	if err := row.Scan(&id, &goalID, &owner, &term.Version, &effective,
@@ -242,9 +242,7 @@ func scanTerm(row interface{ Scan(...any) error }) (*domain.GoalTerm, error) {
 	if term.GoalID, err = db.UUIDFromBytes(goalID); err != nil {
 		return nil, err
 	}
-	if term.OwnerID, err = db.UUIDFromBytes(owner); err != nil {
-		return nil, err
-	}
+	term.OwnerID = owner
 	term.EffectiveFromPeriod = domain.PeriodFromDate(effective)
 	if baseline.Valid {
 		value := baseline.Int64
@@ -257,10 +255,10 @@ func scanTerm(row interface{ Scan(...any) error }) (*domain.GoalTerm, error) {
 	return &term, nil
 }
 
-func (s *Store) termCategories(ctx context.Context, ownerID, termID uuid.UUID) ([]uuid.UUID, error) {
+func (s *Store) termCategories(ctx context.Context, ownerID string, termID uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT category_id FROM saving_goal_term_categories
-		WHERE term_id = ? AND owner_id = ?`, db.UUIDBytes(termID), db.UUIDBytes(ownerID))
+		WHERE term_id = ? AND owner_id = ?`, db.UUIDBytes(termID), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -295,19 +293,19 @@ func (s *Store) LatestTermEffective(ctx context.Context, q queryer, goalID uuid.
 	return &value, nil
 }
 
-func (s *Store) GetGoalTx(ctx context.Context, q queryer, ownerID, id uuid.UUID) (*domain.SavingGoal, error) {
+func (s *Store) GetGoalTx(ctx context.Context, q queryer, ownerID string, id uuid.UUID) (*domain.SavingGoal, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT id, owner_id, name, status, start_period, end_period, version, archived_at,
 		       created_at, updated_at
-		FROM saving_goals WHERE id = ? AND owner_id = ?`, db.UUIDBytes(id), db.UUIDBytes(ownerID))
+		FROM saving_goals WHERE id = ? AND owner_id = ?`, db.UUIDBytes(id), ownerID)
 	return scanGoal(row)
 }
 
-func (s *Store) ListGoalsTx(ctx context.Context, q queryer, ownerID uuid.UUID, status string, limit int) ([]domain.SavingGoal, error) {
+func (s *Store) ListGoalsTx(ctx context.Context, q queryer, ownerID string, status string, limit int) ([]domain.SavingGoal, error) {
 	query := `SELECT id, owner_id, name, status, start_period, end_period, version, archived_at,
 	                 created_at, updated_at
 	          FROM saving_goals WHERE owner_id = ?`
-	args := []any{db.UUIDBytes(ownerID)}
+	args := []any{ownerID}
 	if status != "" {
 		query += ` AND status = ?`
 		args = append(args, status)
@@ -330,13 +328,13 @@ func (s *Store) ListGoalsTx(ctx context.Context, q queryer, ownerID uuid.UUID, s
 	return out, rows.Err()
 }
 
-func (s *Store) ListTermsTx(ctx context.Context, q queryer, ownerID, goalID uuid.UUID) ([]domain.GoalTerm, error) {
+func (s *Store) ListTermsTx(ctx context.Context, q queryer, ownerID string, goalID uuid.UUID) ([]domain.GoalTerm, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, goal_id, owner_id, version, effective_from_period, scope_kind,
 		       baseline_kind, baseline_fen, initial_baseline_fen, target_saving_fen, created_at
 		FROM saving_goal_terms
 		WHERE goal_id = ? AND owner_id = ?
-		ORDER BY version ASC`, db.UUIDBytes(goalID), db.UUIDBytes(ownerID))
+		ORDER BY version ASC`, db.UUIDBytes(goalID), ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -362,10 +360,10 @@ func (s *Store) ListTermsTx(ctx context.Context, q queryer, ownerID, goalID uuid
 	return terms, nil
 }
 
-func (s *Store) termCategoriesTx(ctx context.Context, q queryer, ownerID, termID uuid.UUID) ([]uuid.UUID, error) {
+func (s *Store) termCategoriesTx(ctx context.Context, q queryer, ownerID string, termID uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT category_id FROM saving_goal_term_categories
-		WHERE term_id = ? AND owner_id = ?`, db.UUIDBytes(termID), db.UUIDBytes(ownerID))
+		WHERE term_id = ? AND owner_id = ?`, db.UUIDBytes(termID), ownerID)
 	if err != nil {
 		return nil, err
 	}

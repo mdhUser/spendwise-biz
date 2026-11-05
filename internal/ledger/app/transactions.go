@@ -69,7 +69,7 @@ type transactionRefOptions struct {
 	allowArchivedAccount  bool
 }
 
-func (s *Service) CreateTransaction(ctx context.Context, ownerID, actorID uuid.UUID, requestID, key string, input CreateTransactionInput) (any, bool, error) {
+func (s *Service) CreateTransaction(ctx context.Context, ownerID, actorID string, requestID, key string, input CreateTransactionInput) (any, bool, error) {
 	tx, err := s.buildTransaction(ctx, ownerID, input, transactionRefOptions{})
 	if err != nil {
 		return nil, false, err
@@ -93,7 +93,7 @@ func (s *Service) CreateTransaction(ctx context.Context, ownerID, actorID uuid.U
 	return body, replay, err
 }
 
-func (s *Service) buildTransaction(ctx context.Context, ownerID uuid.UUID, input CreateTransactionInput, refs transactionRefOptions) (*domain.Transaction, error) {
+func (s *Service) buildTransaction(ctx context.Context, ownerID string, input CreateTransactionInput, refs transactionRefOptions) (*domain.Transaction, error) {
 	txType := domain.TransactionType(input.Type)
 	if !txType.Valid() {
 		return nil, apperr.Validation("流水类型不合法")
@@ -162,7 +162,7 @@ func (s *Service) buildTransaction(ctx context.Context, ownerID uuid.UUID, input
 	}, nil
 }
 
-func (s *Service) GetTransaction(ctx context.Context, ownerID, transactionID uuid.UUID) (any, error) {
+func (s *Service) GetTransaction(ctx context.Context, ownerID string, transactionID uuid.UUID) (any, error) {
 	tx, err := s.store.GetTransaction(ctx, ownerID, transactionID)
 	if err != nil {
 		return nil, apperr.NotFound("流水不存在")
@@ -170,7 +170,7 @@ func (s *Service) GetTransaction(ctx context.Context, ownerID, transactionID uui
 	return s.transactionView(ctx, ownerID, tx), nil
 }
 
-func (s *Service) ListTransactions(ctx context.Context, ownerID uuid.UUID, filter domain.TransactionFilter) (any, error) {
+func (s *Service) ListTransactions(ctx context.Context, ownerID string, filter domain.TransactionFilter) (any, error) {
 	page, err := s.store.ListTransactions(ctx, ownerID, filter)
 	if err != nil {
 		return nil, err
@@ -257,7 +257,7 @@ func validateAccountReference(account *domain.Account, allowArchived bool) error
 	return nil
 }
 
-func (s *Service) UpdateTransaction(ctx context.Context, ownerID, actorID, transactionID uuid.UUID, requestID string, input UpdateTransactionInput) (any, error) {
+func (s *Service) UpdateTransaction(ctx context.Context, ownerID, actorID string, transactionID uuid.UUID, requestID string, input UpdateTransactionInput) (any, error) {
 	current, err := s.store.GetTransaction(ctx, ownerID, transactionID)
 	if err != nil {
 		return nil, apperr.NotFound("流水不存在")
@@ -299,7 +299,7 @@ func (s *Service) UpdateTransaction(ctx context.Context, ownerID, actorID, trans
 	return s.transactionView(ctx, ownerID, rebuilt), nil
 }
 
-func (s *Service) DeleteTransaction(ctx context.Context, ownerID, actorID, transactionID uuid.UUID, requestID string) error {
+func (s *Service) DeleteTransaction(ctx context.Context, ownerID, actorID string, transactionID uuid.UUID, requestID string) error {
 	return db.WithTx(ctx, s.db, nil, func(tx *sql.Tx) error {
 		if err := s.store.SoftDeleteTransaction(ctx, tx, ownerID, transactionID, time.Now().UTC()); err != nil {
 			if errors.Is(err, ledgerstore.ErrConflict) {
@@ -319,7 +319,7 @@ func (s *Service) DeleteTransaction(ctx context.Context, ownerID, actorID, trans
 	})
 }
 
-func (s *Service) RestoreTransaction(ctx context.Context, ownerID, actorID, transactionID uuid.UUID, requestID string) error {
+func (s *Service) RestoreTransaction(ctx context.Context, ownerID, actorID string, transactionID uuid.UUID, requestID string) error {
 	return db.WithTx(ctx, s.db, nil, func(tx *sql.Tx) error {
 		if err := s.store.RestoreTransaction(ctx, tx, ownerID, transactionID, time.Now().UTC()); err != nil {
 			if errors.Is(err, ledgerstore.ErrConflict) {
@@ -337,7 +337,7 @@ func (s *Service) RestoreTransaction(ctx context.Context, ownerID, actorID, tran
 	})
 }
 
-func (s *Service) Summary(ctx context.Context, ownerID uuid.UUID, from, to time.Time, groupBy string) (any, error) {
+func (s *Service) Summary(ctx context.Context, ownerID string, from, to time.Time, groupBy string) (any, error) {
 	summary, err := s.store.Summary(ctx, ownerID, from, to, groupBy)
 	if err != nil {
 		return nil, err
@@ -350,7 +350,7 @@ func (s *Service) Summary(ctx context.Context, ownerID uuid.UUID, from, to time.
 	}, nil
 }
 
-func (s *Service) transactionView(ctx context.Context, ownerID uuid.UUID, tx *domain.Transaction) map[string]any {
+func (s *Service) transactionView(ctx context.Context, ownerID string, tx *domain.Transaction) map[string]any {
 	view := map[string]any{
 		"id": tx.ID, "type": tx.Type, "amountFen": tx.AmountFen, "currency": "CNY",
 		"occurredAt": displayTime(tx.OccurredAt), "note": tx.Note, "merchant": tx.Merchant,

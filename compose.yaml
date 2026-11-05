@@ -3,10 +3,11 @@ services:
     image: mysql:8.4
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: spendwise_biz
+      MYSQL_DATABASE: spendwise
       MYSQL_USER: biz_app
       MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD}
       MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:?Set MYSQL_MIGRATOR_PASSWORD}
+      MYSQL_APP_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD}
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
@@ -28,8 +29,8 @@ services:
     env_file:
       - .env
     environment:
-      BIZ_MYSQL_DSN: biz_migrator:${MYSQL_MIGRATOR_PASSWORD}@tcp(db:3306)/spendwise_biz?parseTime=true&loc=UTC
-      BIZ_MIGRATION_DSN: biz_migrator:${MYSQL_MIGRATOR_PASSWORD}@tcp(db:3306)/spendwise_biz?parseTime=true&loc=UTC
+      BIZ_MYSQL_DSN: biz_migrator:${MYSQL_MIGRATOR_PASSWORD}@tcp(db:3306)/spendwise?parseTime=true&loc=UTC
+      BIZ_MIGRATION_DSN: biz_migrator:${MYSQL_MIGRATOR_PASSWORD}@tcp(db:3306)/spendwise?parseTime=true&loc=UTC
     depends_on:
       db:
         condition: service_healthy
@@ -40,7 +41,11 @@ services:
       - .env
     environment:
       BIZ_HTTP_ADDR: 0.0.0.0:8080
-      BIZ_MYSQL_DSN: biz_app:${MYSQL_APP_PASSWORD}@tcp(db:3306)/spendwise_biz?parseTime=true&loc=UTC
+      BIZ_MYSQL_DSN: biz_app:${MYSQL_APP_PASSWORD}@tcp(db:3306)/spendwise?parseTime=true&loc=UTC
+      # spendwise-auth runs separately (or via compose.integration.yaml).
+      BIZ_AUTH_BASE_URL: ${BIZ_AUTH_BASE_URL:-http://host.docker.internal:8081}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:

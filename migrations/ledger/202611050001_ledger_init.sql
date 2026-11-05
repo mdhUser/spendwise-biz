@@ -1,9 +1,21 @@
 -- +goose Up
--- ledger module
+-- ledger module. owner_id references spendwise-auth users.id (VARCHAR(191))
+-- but deliberately has no cross-service foreign key: auth owns its schema and
+-- the two services only communicate over HTTP.
+
+-- One-time rebuild: the previous identity-coupled ledger schema is replaced.
+DROP TABLE IF EXISTS saving_goal_term_categories;
+DROP TABLE IF EXISTS saving_goal_terms;
+DROP TABLE IF EXISTS saving_goals;
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS idempotency_records;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS categories;
+DROP TABLE IF EXISTS accounts;
 
 CREATE TABLE accounts (
   id BINARY(16) NOT NULL,
-  owner_id BINARY(16) NOT NULL,
+  owner_id VARCHAR(191) NOT NULL,
   name VARCHAR(40) NOT NULL,
   kind VARCHAR(16) NOT NULL,
   archived_at DATETIME(3) NULL,
@@ -17,7 +29,6 @@ CREATE TABLE accounts (
   UNIQUE KEY accounts_id_owner_key (id, owner_id),
   UNIQUE KEY accounts_owner_name_key (owner_id, active_name),
   KEY accounts_owner_created_idx (owner_id, created_at, id),
-  CONSTRAINT accounts_owner_fk FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE RESTRICT,
   CONSTRAINT accounts_name_chk CHECK (CHAR_LENGTH(TRIM(name)) BETWEEN 1 AND 40),
   CONSTRAINT accounts_kind_chk CHECK (kind IN ('cash', 'debit_card', 'credit_card', 'alipay', 'wechat', 'other')),
   CONSTRAINT accounts_version_chk CHECK (version > 0)
@@ -25,7 +36,7 @@ CREATE TABLE accounts (
 
 CREATE TABLE categories (
   id BINARY(16) NOT NULL,
-  owner_id BINARY(16) NOT NULL,
+  owner_id VARCHAR(191) NOT NULL,
   name VARCHAR(40) NOT NULL,
   kind VARCHAR(16) NOT NULL,
   icon VARCHAR(40) NOT NULL DEFAULT '',
@@ -42,7 +53,6 @@ CREATE TABLE categories (
   UNIQUE KEY categories_id_owner_key (id, owner_id),
   UNIQUE KEY categories_owner_kind_name_key (owner_id, kind, active_name),
   KEY categories_owner_kind_sort_idx (owner_id, kind, sort_order, id),
-  CONSTRAINT categories_owner_fk FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE RESTRICT,
   CONSTRAINT categories_name_chk CHECK (CHAR_LENGTH(TRIM(name)) BETWEEN 1 AND 40),
   CONSTRAINT categories_kind_chk CHECK (kind IN ('expense', 'income')),
   CONSTRAINT categories_color_chk CHECK (color = '' OR color REGEXP '^#[0-9A-Fa-f]{6}$'),
@@ -51,7 +61,7 @@ CREATE TABLE categories (
 
 CREATE TABLE transactions (
   id BINARY(16) NOT NULL,
-  owner_id BINARY(16) NOT NULL,
+  owner_id VARCHAR(191) NOT NULL,
   type VARCHAR(16) NOT NULL,
   amount_fen BIGINT NOT NULL,
   occurred_at DATETIME(3) NOT NULL,
@@ -71,7 +81,6 @@ CREATE TABLE transactions (
   KEY transactions_owner_type_occurred_idx (owner_id, type, occurred_at),
   KEY transactions_category_fk_idx (category_id, owner_id),
   KEY transactions_account_fk_idx (account_id, owner_id),
-  CONSTRAINT transactions_owner_fk FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE RESTRICT,
   CONSTRAINT transactions_category_fk FOREIGN KEY (category_id, owner_id) REFERENCES categories (id, owner_id) ON DELETE RESTRICT,
   CONSTRAINT transactions_account_fk FOREIGN KEY (account_id, owner_id) REFERENCES accounts (id, owner_id) ON DELETE RESTRICT,
   CONSTRAINT transactions_amount_chk CHECK (amount_fen > 0 AND amount_fen <= 100000000000),
@@ -83,7 +92,7 @@ CREATE TABLE transactions (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE idempotency_records (
-  owner_id BINARY(16) NOT NULL,
+  owner_id VARCHAR(191) NOT NULL,
   idempotency_key VARCHAR(128) NOT NULL,
   request_hash VARBINARY(32) NOT NULL,
   state VARCHAR(16) NOT NULL DEFAULT 'pending',
@@ -96,7 +105,6 @@ CREATE TABLE idempotency_records (
   PRIMARY KEY (owner_id, idempotency_key),
   KEY idempotency_records_expires_idx (expires_at),
   KEY idempotency_records_state_idx (state, updated_at),
-  CONSTRAINT idempotency_owner_fk FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE CASCADE,
   CONSTRAINT idempotency_state_chk CHECK (state IN ('pending', 'completed')),
   CONSTRAINT idempotency_key_len_chk CHECK (CHAR_LENGTH(idempotency_key) BETWEEN 8 AND 128),
   CONSTRAINT idempotency_response_chk CHECK (
@@ -108,11 +116,11 @@ CREATE TABLE idempotency_records (
 
 CREATE TABLE audit_events (
   id BINARY(16) NOT NULL,
-  owner_id BINARY(16) NOT NULL,
+  owner_id VARCHAR(191) NOT NULL,
   entity_type VARCHAR(32) NOT NULL,
   entity_id BINARY(16) NOT NULL,
   action_type VARCHAR(16) NOT NULL,
-  actor_user_id BINARY(16) NOT NULL,
+  actor_user_id VARCHAR(191) NOT NULL,
   request_id VARCHAR(64) NOT NULL DEFAULT '',
   before_data JSON NULL,
   after_data JSON NULL,
@@ -120,8 +128,6 @@ CREATE TABLE audit_events (
   PRIMARY KEY (id),
   KEY audit_events_owner_entity_idx (owner_id, entity_type, entity_id, created_at),
   KEY audit_events_actor_idx (actor_user_id),
-  CONSTRAINT audit_events_owner_fk FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE CASCADE,
-  CONSTRAINT audit_events_actor_fk FOREIGN KEY (actor_user_id) REFERENCES users (id) ON DELETE CASCADE,
   CONSTRAINT audit_events_entity_chk CHECK (entity_type IN ('transaction', 'account', 'category', 'saving_goal', 'saving_goal_term')),
   CONSTRAINT audit_events_action_chk CHECK (action_type IN ('create', 'update', 'delete', 'archive', 'restore')),
   CONSTRAINT audit_events_request_chk CHECK (CHAR_LENGTH(request_id) <= 64)
@@ -129,7 +135,7 @@ CREATE TABLE audit_events (
 
 CREATE TABLE saving_goals (
   id BINARY(16) NOT NULL,
-  owner_id BINARY(16) NOT NULL,
+  owner_id VARCHAR(191) NOT NULL,
   name VARCHAR(60) NOT NULL,
   status VARCHAR(16) NOT NULL DEFAULT 'active',
   start_period DATE NOT NULL,
@@ -141,7 +147,6 @@ CREATE TABLE saving_goals (
   PRIMARY KEY (id),
   UNIQUE KEY saving_goals_id_owner_key (id, owner_id),
   KEY saving_goals_owner_status_idx (owner_id, status, start_period, id),
-  CONSTRAINT saving_goals_owner_fk FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE RESTRICT,
   CONSTRAINT saving_goals_name_chk CHECK (CHAR_LENGTH(TRIM(name)) BETWEEN 1 AND 60),
   CONSTRAINT saving_goals_status_chk CHECK (status IN ('active', 'archived')),
   CONSTRAINT saving_goals_start_chk CHECK (DAY(start_period) = 1),
@@ -152,7 +157,7 @@ CREATE TABLE saving_goals (
 CREATE TABLE saving_goal_terms (
   id BINARY(16) NOT NULL,
   goal_id BINARY(16) NOT NULL,
-  owner_id BINARY(16) NOT NULL,
+  owner_id VARCHAR(191) NOT NULL,
   version INT NOT NULL,
   effective_from_period DATE NOT NULL,
   scope_kind VARCHAR(16) NOT NULL,
@@ -185,7 +190,7 @@ CREATE TABLE saving_goal_terms (
 
 CREATE TABLE saving_goal_term_categories (
   term_id BINARY(16) NOT NULL,
-  owner_id BINARY(16) NOT NULL,
+  owner_id VARCHAR(191) NOT NULL,
   category_id BINARY(16) NOT NULL,
   PRIMARY KEY (term_id, category_id),
   KEY saving_goal_term_categories_term_owner_idx (term_id, owner_id),

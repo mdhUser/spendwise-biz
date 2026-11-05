@@ -59,23 +59,23 @@ func (s *Store) CreateTransaction(ctx context.Context, q queryer, tx *domain.Tra
 		(id, owner_id, type, amount_fen, occurred_at, category_id, account_id,
 		 note, merchant, tags, version, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		db.UUIDBytes(tx.ID), db.UUIDBytes(tx.OwnerID), tx.Type, tx.AmountFen,
+		db.UUIDBytes(tx.ID), tx.OwnerID, tx.Type, tx.AmountFen,
 		tx.OccurredAt, nullableUUID(tx.CategoryID), nullableUUID(tx.AccountID),
 		tx.Note, tx.Merchant, tags, tx.Version, tx.CreatedAt, tx.UpdatedAt)
 	return err
 }
 
-func (s *Store) GetTransaction(ctx context.Context, ownerID, id uuid.UUID) (*domain.Transaction, error) {
+func (s *Store) GetTransaction(ctx context.Context, ownerID string, id uuid.UUID) (*domain.Transaction, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+transactionColumns+`
 		FROM transactions WHERE id = ? AND owner_id = ? AND deleted_at IS NULL`,
-		db.UUIDBytes(id), db.UUIDBytes(ownerID))
+		db.UUIDBytes(id), ownerID)
 	return scanTransaction(row)
 }
 
-func (s *Store) ListTransactions(ctx context.Context, ownerID uuid.UUID, filter domain.TransactionFilter) (TransactionPage, error) {
+func (s *Store) ListTransactions(ctx context.Context, ownerID string, filter domain.TransactionFilter) (TransactionPage, error) {
 	query := `SELECT ` + transactionColumns + ` FROM transactions
 	          WHERE owner_id = ? AND deleted_at IS NULL`
-	args := []any{db.UUIDBytes(ownerID)}
+	args := []any{ownerID}
 	if filter.From != nil {
 		query += ` AND occurred_at >= ?`
 		args = append(args, *filter.From)
@@ -149,31 +149,31 @@ func (s *Store) UpdateTransaction(ctx context.Context, q queryer, tx *domain.Tra
 		WHERE id = ? AND owner_id = ? AND version = ? AND deleted_at IS NULL`,
 		tx.Type, tx.AmountFen, tx.OccurredAt, nullableUUID(tx.CategoryID),
 		nullableUUID(tx.AccountID), tx.Note, tx.Merchant, tags, tx.UpdatedAt,
-		db.UUIDBytes(tx.ID), db.UUIDBytes(tx.OwnerID), expectedVersion)
+		db.UUIDBytes(tx.ID), tx.OwnerID, expectedVersion)
 	if err != nil {
 		return err
 	}
 	return expectOne(result)
 }
 
-func (s *Store) SoftDeleteTransaction(ctx context.Context, q queryer, ownerID, id uuid.UUID, now time.Time) error {
+func (s *Store) SoftDeleteTransaction(ctx context.Context, q queryer, ownerID string, id uuid.UUID, now time.Time) error {
 	result, err := q.ExecContext(ctx, `
 		UPDATE transactions SET deleted_at = ?, version = version + 1, updated_at = ?
 		WHERE id = ? AND owner_id = ? AND deleted_at IS NULL`,
-		now, now, db.UUIDBytes(id), db.UUIDBytes(ownerID))
+		now, now, db.UUIDBytes(id), ownerID)
 	if err != nil {
 		return err
 	}
 	return expectOne(result)
 }
 
-func (s *Store) RestoreTransaction(ctx context.Context, q queryer, ownerID, id uuid.UUID, now time.Time) error {
+func (s *Store) RestoreTransaction(ctx context.Context, q queryer, ownerID string, id uuid.UUID, now time.Time) error {
 	result, err := q.ExecContext(ctx, `
 		UPDATE transactions SET deleted_at = NULL, version = version + 1, updated_at = ?
 		WHERE id = ? AND owner_id = ?
 		  AND deleted_at IS NOT NULL
 		  AND deleted_at >= DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 30 DAY)`,
-		now, db.UUIDBytes(id), db.UUIDBytes(ownerID))
+		now, db.UUIDBytes(id), ownerID)
 	if err != nil {
 		return err
 	}
@@ -182,7 +182,8 @@ func (s *Store) RestoreTransaction(ctx context.Context, q queryer, ownerID, id u
 
 func scanTransaction(row interface{ Scan(...any) error }) (*domain.Transaction, error) {
 	var tx domain.Transaction
-	var id, owner, category, account []byte
+	var id, category, account []byte
+	var owner string
 	var tags []byte
 	var deleted sql.NullTime
 	if err := row.Scan(&id, &owner, &tx.Type, &tx.AmountFen, &tx.OccurredAt,
@@ -197,9 +198,7 @@ func scanTransaction(row interface{ Scan(...any) error }) (*domain.Transaction, 
 	if tx.ID, err = db.UUIDFromBytes(id); err != nil {
 		return nil, err
 	}
-	if tx.OwnerID, err = db.UUIDFromBytes(owner); err != nil {
-		return nil, err
-	}
+	tx.OwnerID = owner
 	if tx.CategoryID, err = db.UUIDPtrFromBytes(category); err != nil {
 		return nil, err
 	}
@@ -227,7 +226,7 @@ func nullableUUID(id *uuid.UUID) any {
 	return db.UUIDBytes(*id)
 }
 
-func (s *Store) MonthlySpend(ctx context.Context, ownerID uuid.UUID, from, to time.Time) ([]domain.MonthlySpend, error) {
+func (s *Store) MonthlySpend(ctx context.Context, ownerID string, from, to time.Time) ([]domain.MonthlySpend, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT EXTRACT(YEAR_MONTH FROM DATE_ADD(occurred_at, INTERVAL 8 HOUR)) AS period_ym,
 		       category_id,
@@ -238,7 +237,7 @@ func (s *Store) MonthlySpend(ctx context.Context, ownerID uuid.UUID, from, to ti
 		  AND type IN ('expense', 'refund')
 		  AND occurred_at >= ? AND occurred_at < ?
 		GROUP BY period_ym, category_id
-		ORDER BY period_ym ASC`, db.UUIDBytes(ownerID), from, to)
+		ORDER BY period_ym ASC`, ownerID, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +264,7 @@ func (s *Store) MonthlySpend(ctx context.Context, ownerID uuid.UUID, from, to ti
 	return out, rows.Err()
 }
 
-func (s *Store) Summary(ctx context.Context, ownerID uuid.UUID, from, to time.Time, groupBy string) (domain.Summary, error) {
+func (s *Store) Summary(ctx context.Context, ownerID string, from, to time.Time, groupBy string) (domain.Summary, error) {
 	var summary domain.Summary
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount_fen ELSE 0 END), 0),
@@ -274,7 +273,7 @@ func (s *Store) Summary(ctx context.Context, ownerID uuid.UUID, from, to time.Ti
 		FROM transactions
 		WHERE owner_id = ? AND deleted_at IS NULL
 		  AND occurred_at >= ? AND occurred_at < ?`,
-		db.UUIDBytes(ownerID), from, to).Scan(&summary.IncomeFen, &summary.ExpenseFen, &summary.RefundFen)
+		ownerID, from, to).Scan(&summary.IncomeFen, &summary.ExpenseFen, &summary.RefundFen)
 	if err != nil {
 		return domain.Summary{}, err
 	}
@@ -307,7 +306,7 @@ func (s *Store) Summary(ctx context.Context, ownerID uuid.UUID, from, to time.Ti
 		  AND t.type IN ('expense', 'refund')
 		GROUP BY %s
 		ORDER BY group_key ASC`, keyExpr, categoryExpr, groupByClause)
-	rows, err := s.db.QueryContext(ctx, query, db.UUIDBytes(ownerID), from, to)
+	rows, err := s.db.QueryContext(ctx, query, ownerID, from, to)
 	if err != nil {
 		return domain.Summary{}, err
 	}
@@ -328,29 +327,29 @@ func (s *Store) Summary(ctx context.Context, ownerID uuid.UUID, from, to time.Ti
 	return summary, rows.Err()
 }
 
-func (s *Store) HasCategory(ctx context.Context, ownerID, categoryID uuid.UUID) (bool, error) {
+func (s *Store) HasCategory(ctx context.Context, ownerID string, categoryID uuid.UUID) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM categories
 		WHERE id = ? AND owner_id = ? AND archived_at IS NULL`,
-		db.UUIDBytes(categoryID), db.UUIDBytes(ownerID)).Scan(&count)
+		db.UUIDBytes(categoryID), ownerID).Scan(&count)
 	return count == 1, err
 }
 
-func (s *Store) HasAccount(ctx context.Context, ownerID, accountID uuid.UUID) (bool, error) {
+func (s *Store) HasAccount(ctx context.Context, ownerID string, accountID uuid.UUID) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM accounts
 		WHERE id = ? AND owner_id = ? AND archived_at IS NULL`,
-		db.UUIDBytes(accountID), db.UUIDBytes(ownerID)).Scan(&count)
+		db.UUIDBytes(accountID), ownerID).Scan(&count)
 	return count == 1, err
 }
 
-func (s *Store) CategoryKind(ctx context.Context, ownerID, categoryID uuid.UUID) (string, error) {
+func (s *Store) CategoryKind(ctx context.Context, ownerID string, categoryID uuid.UUID) (string, error) {
 	var kind string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT kind FROM categories WHERE id = ? AND owner_id = ?`,
-		db.UUIDBytes(categoryID), db.UUIDBytes(ownerID)).Scan(&kind)
+		db.UUIDBytes(categoryID), ownerID).Scan(&kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", domain.ErrNotFound
 	}
@@ -359,7 +358,7 @@ func (s *Store) CategoryKind(ctx context.Context, ownerID, categoryID uuid.UUID)
 
 // MonthlySpendTx is the read-only-transaction variant used by achievement
 // queries so goal/terms/spend come from one consistent snapshot.
-func (s *Store) MonthlySpendTx(ctx context.Context, q queryer, ownerID uuid.UUID, from, to time.Time) ([]domain.MonthlySpend, error) {
+func (s *Store) MonthlySpendTx(ctx context.Context, q queryer, ownerID string, from, to time.Time) ([]domain.MonthlySpend, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT EXTRACT(YEAR_MONTH FROM DATE_ADD(occurred_at, INTERVAL 8 HOUR)) AS period_ym,
 		       category_id,
@@ -370,7 +369,7 @@ func (s *Store) MonthlySpendTx(ctx context.Context, q queryer, ownerID uuid.UUID
 		  AND type IN ('expense', 'refund')
 		  AND occurred_at >= ? AND occurred_at < ?
 		GROUP BY period_ym, category_id
-		ORDER BY period_ym ASC`, db.UUIDBytes(ownerID), from, to)
+		ORDER BY period_ym ASC`, ownerID, from, to)
 	if err != nil {
 		return nil, err
 	}

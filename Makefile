@@ -1,4 +1,4 @@
-.PHONY: run migrate invite test vet build
+.PHONY: run migrate cleanup test vet build
 
 run:
 	go run ./cmd/api
@@ -6,8 +6,8 @@ run:
 migrate:
 	go run ./cmd/migrate
 
-invite:
-	go run ./cmd/admin invite create -uses 20 -ttl 720h
+cleanup:
+	go run ./cmd/admin cleanup
 
 test:
 	go test ./...

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -20,8 +21,9 @@ type Config struct {
 
 	Timezone string
 
-	SessionTTL        time.Duration
-	AbsoluteTTL       time.Duration
+	AuthBaseURL string
+	AuthTimeout time.Duration
+
 	IdempotencyTTL    time.Duration
 	RequestTimeout    time.Duration
 	DBTimeout         time.Duration
@@ -29,9 +31,7 @@ type Config struct {
 	DBMaxOpen         int
 	DBMaxIdle         int
 
-	InvitePepper     string
-	RegistrationMode string
-	LogLevel         slog.Level
+	LogLevel slog.Level
 
 	TrustProxy     bool
 	AllowedOrigins []string
@@ -45,19 +45,12 @@ func Load() (*Config, error) {
 	if cfg.MigrationDSN == "" {
 		cfg.MigrationDSN = cfg.MySQLDSN
 	}
-	cfg.InvitePepper = os.Getenv("BIZ_INVITE_PEPPER")
-	cfg.RegistrationMode = env("BIZ_REGISTRATION_MODE", "invite")
 	cfg.HTTPAddr = env("BIZ_HTTP_ADDR", cfg.HTTPAddr)
 	cfg.Timezone = env("BIZ_TIMEZONE", cfg.Timezone)
+	cfg.AuthBaseURL = env("BIZ_AUTH_BASE_URL", cfg.AuthBaseURL)
 
 	if cfg.MySQLDSN == "" {
 		return nil, errors.New("BIZ_MYSQL_DSN is required")
-	}
-	if len(cfg.InvitePepper) < 32 {
-		return nil, errors.New("BIZ_INVITE_PEPPER must contain at least 32 characters")
-	}
-	if cfg.RegistrationMode != "invite" && cfg.RegistrationMode != "closed" {
-		return nil, errors.New("BIZ_REGISTRATION_MODE must be invite or closed")
 	}
 	if err := parseDurations(cfg); err != nil {
 		return nil, err
@@ -95,8 +88,15 @@ func (c *Config) Validate() error {
 	if _, err := time.LoadLocation(c.Timezone); err != nil {
 		return fmt.Errorf("invalid timezone %q: %w", c.Timezone, err)
 	}
-	if c.SessionTTL <= 0 || c.AbsoluteTTL < c.SessionTTL {
-		return errors.New("session TTLs are invalid")
+	if c.AuthBaseURL == "" {
+		return errors.New("BIZ_AUTH_BASE_URL must not be empty")
+	}
+	parsed, err := url.Parse(c.AuthBaseURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return errors.New("BIZ_AUTH_BASE_URL must be an absolute http(s) URL")
+	}
+	if c.AuthTimeout <= 0 {
+		return errors.New("BIZ_AUTH_TIMEOUT must be positive")
 	}
 	if c.DBMaxOpen < 1 || c.DBMaxIdle < 0 || c.DBMaxIdle > c.DBMaxOpen {
 		return errors.New("database pool sizes are invalid")
@@ -116,8 +116,8 @@ func defaults() *Config {
 	return &Config{
 		HTTPAddr:          "127.0.0.1:8080",
 		Timezone:          "Asia/Shanghai",
-		SessionTTL:        720 * time.Hour,
-		AbsoluteTTL:       2160 * time.Hour,
+		AuthBaseURL:       "http://127.0.0.1:8081",
+		AuthTimeout:       5 * time.Second,
 		IdempotencyTTL:    2160 * time.Hour,
 		RequestTimeout:    15 * time.Second,
 		DBTimeout:         5 * time.Second,
@@ -129,17 +129,13 @@ func defaults() *Config {
 }
 
 func parseDurations(c *Config) error {
-	c.SessionTTL = durationEnv("BIZ_SESSION_TTL", c.SessionTTL)
-	c.AbsoluteTTL = durationEnv("BIZ_SESSION_ABSOLUTE_TTL", c.AbsoluteTTL)
+	c.AuthTimeout = durationEnv("BIZ_AUTH_TIMEOUT", c.AuthTimeout)
 	c.IdempotencyTTL = durationEnv("BIZ_IDEMPOTENCY_TTL", c.IdempotencyTTL)
 	c.RequestTimeout = durationEnv("BIZ_REQUEST_TIMEOUT", c.RequestTimeout)
 	c.DBTimeout = durationEnv("BIZ_DB_TIMEOUT", c.DBTimeout)
 	c.DBConnMaxLifetime = durationEnv("BIZ_DB_CONN_MAX_LIFETIME", c.DBConnMaxLifetime)
 	c.DBMaxOpen = intEnv("BIZ_DB_MAX_OPEN_CONNS", c.DBMaxOpen)
 	c.DBMaxIdle = intEnv("BIZ_DB_MAX_IDLE_CONNS", c.DBMaxIdle)
-	if c.AbsoluteTTL < c.SessionTTL {
-		return errors.New("BIZ_SESSION_ABSOLUTE_TTL must be >= BIZ_SESSION_TTL")
-	}
 	return nil
 }
 

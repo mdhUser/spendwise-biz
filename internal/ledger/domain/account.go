@@ -8,7 +8,7 @@ import (
 
 type Account struct {
 	ID         uuid.UUID
-	OwnerID    uuid.UUID
+	OwnerID    string
 	Name       string
 	Kind       string
 	ArchivedAt *time.Time
@@ -19,7 +19,7 @@ type Account struct {
 
 type Category struct {
 	ID         uuid.UUID
-	OwnerID    uuid.UUID
+	OwnerID    string
 	Name       string
 	Kind       string
 	Icon       string

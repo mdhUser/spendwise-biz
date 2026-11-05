@@ -1,0 +1,75 @@
+# Local integration stack: one MySQL 8.4 database (`spendwise`) shared by
+# spendwise-auth and spendwise-biz. This file is for local development and CI
+# smoke tests only; replace every secret before using it anywhere else.
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root-change-me
+      MYSQL_DATABASE: spendwise
+      MYSQL_USER: spendwise_auth
+      MYSQL_PASSWORD: change-me
+      MYSQL_APP_PASSWORD: change-me-app
+      MYSQL_MIGRATOR_PASSWORD: change-me-migrator
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - spendwise-integration-mysql:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h127.0.0.1 -uroot -proot-change-me"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  auth:
+    build: ../spendwise-auth
+    environment:
+      AUTH_ADDR: :8081
+      AUTH_DATABASE_URL: spendwise_auth:change-me@tcp(db:3306)/spendwise?parseTime=true&charset=utf8mb4&loc=UTC
+      AUTH_SESSION_TTL: 720h
+      AUTH_CHALLENGE_TTL: 10m
+      AUTH_CODE_SECRET: local-integration-code-secret-0123456789
+      AUTH_IDENTIFIER_SECRET: local-integration-identifier-secret-0123456789
+      AUTH_DATA_KEY: "01234567890123456789012345678901"
+      AUTH_COOKIE_NAME: spendwise_auth_session
+      AUTH_COOKIE_SECURE: "false"
+      AUTH_ALLOWED_ORIGINS: http://localhost:3000
+      AUTH_EXPOSE_DEV_CODES: "true"
+    ports:
+      - "127.0.0.1:8081:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  biz-migrate:
+    build: .
+    command: ["/app/migrate"]
+    environment:
+      BIZ_MYSQL_DSN: biz_migrator:change-me-migrator@tcp(db:3306)/spendwise?parseTime=true&loc=UTC
+      BIZ_MIGRATION_DSN: biz_migrator:change-me-migrator@tcp(db:3306)/spendwise?parseTime=true&loc=UTC
+    depends_on:
+      db:
+        condition: service_healthy
+
+  biz:
+    build: .
+    environment:
+      BIZ_HTTP_ADDR: 0.0.0.0:8080
+      BIZ_MYSQL_DSN: biz_app:change-me-app@tcp(db:3306)/spendwise?parseTime=true&loc=UTC
+      BIZ_AUTH_BASE_URL: http://auth:8081
+      BIZ_AUTH_TIMEOUT: 5s
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      biz-migrate:
+        condition: service_completed_successfully
+      auth:
+        condition: service_started
+
+volumes:
+  spendwise-integration-mysql:

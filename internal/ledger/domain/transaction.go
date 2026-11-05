@@ -20,7 +20,7 @@ func (t TransactionType) Valid() bool {
 
 type Transaction struct {
 	ID         uuid.UUID
-	OwnerID    uuid.UUID
+	OwnerID    string
 	Type       TransactionType
 	AmountFen  int64
 	OccurredAt time.Time

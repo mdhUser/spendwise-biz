@@ -12,7 +12,7 @@ jobs:
         image: mysql:8.4
         env:
           MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: spendwise_biz_test
+          MYSQL_DATABASE: spendwise_test
         ports:
           - 3306:3306
         options: >-
@@ -21,7 +21,7 @@ jobs:
           --health-timeout=5s
           --health-retries=20
     env:
-      BIZ_TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/spendwise_biz_test?parseTime=true&loc=UTC
+      BIZ_TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/spendwise_test?parseTime=true&loc=UTC
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
