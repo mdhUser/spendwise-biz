@@ -20,26 +20,30 @@ SpendWise 的核心后端业务仓库。首期实现 `ledger` 模块：用户记
 
 ## 本地启动
 
-需要 Go 1.26+、Docker（用于 MySQL）和 `curl`。先启动认证服务：
+需要 Go 1.26+、Docker（用于 MySQL）和 `curl`。推荐直接使用一体化栈（一个 MySQL、auth、biz）：
 
 ```bash
-cd ../spendwise-auth
-cp .env.example .env
-docker compose up --build
-# auth: http://127.0.0.1:8081，MySQL: 127.0.0.1:3307
+docker compose -f compose.integration.yaml up --build
+# auth:  http://127.0.0.1:8081
+# biz:   http://127.0.0.1:8080
+# MySQL: 127.0.0.1:3307 / spendwise
 ```
 
-再启动业务服务：
+如果只想在宿主机跑 Go 进程，复用同一个 MySQL：
 
 ```bash
-cp .env.example .env
-# 修改 .env 中的 MYSQL_ROOT_PASSWORD、MYSQL_APP_PASSWORD、MYSQL_MIGRATOR_PASSWORD
-# 把 BIZ_MYSQL_DSN / BIZ_MIGRATION_DSN 的密码改成与上面一致
-# 默认 BIZ_AUTH_BASE_URL=http://127.0.0.1:8081
+# 只启动共享 MySQL（3307），不要另起 biz compose 里的 3306 MySQL
+docker compose -f compose.integration.yaml up -d db
 
-docker compose up -d db
-# 首次初始化会执行 db/init/01-users.sh，创建 biz_migrator 并收回 biz_app 的 DDL 权限
-# 如果 mysql_data 卷已存在，需要手动执行该脚本或重建卷
+cd ../spendwise-auth
+cp .env.example .env
+# AUTH_DATABASE_URL 默认已指向 127.0.0.1:3307/spendwise
+go run ./cmd/server
+
+cd ../spendwise-biz
+cp .env.example .env
+# 修改 MYSQL_APP_PASSWORD / MYSQL_MIGRATOR_PASSWORD
+# BIZ_MYSQL_DSN / BIZ_MIGRATION_DSN 默认已指向 127.0.0.1:3307/spendwise
 go run ./cmd/migrate
 go run ./cmd/api
 ```
@@ -51,13 +55,6 @@ curl -s http://127.0.0.1:8080/healthz
 curl -s http://127.0.0.1:8080/readyz
 ```
 
-如果希望一个 compose 栈同时跑 auth + biz + 共享 MySQL，使用：
-
-```bash
-docker compose -f compose.integration.yaml up --build
-```
-
-该文件使用同一个 `spendwise` 数据库，并把 `BIZ_AUTH_BASE_URL` 指向 `http://auth:8081`。仅用于本地联调。
 
 ## 快速验证
 

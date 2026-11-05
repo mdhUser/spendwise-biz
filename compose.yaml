@@ -1,3 +1,5 @@
+# Biz-only stack. It creates a separate MySQL on 3306 and is NOT the shared
+# auth+biz stack; use compose.integration.yaml for one MySQL + auth + biz.
 services:
   db:
     image: mysql:8.4
