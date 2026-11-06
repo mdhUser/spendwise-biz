@@ -162,7 +162,7 @@ func TestMySQLIntegration(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server := httptest.NewServer(httpserver.New(
-		database, logger, ledgerService, ledgerHandler, authClient,
+		database, logger, ledgerService, ledgerHandler, authClient, nil,
 		httpserver.Config{RequestTimeout: cfg.RequestTimeout, Timezone: cfg.Location()},
 	).Handler())
 	t.Cleanup(server.Close)

@@ -24,6 +24,17 @@ type Config struct {
 	AuthBaseURL string
 	AuthTimeout time.Duration
 
+	// JWT local verification. JWKS is preferred; the opaque /v1/auth/me call is
+	// only a compatibility fallback when local verification fails.
+	AuthJWKSURL          string
+	AuthIssuer           string
+	AuthAudience         string
+	AuthJWKSCacheTTL     time.Duration
+	AuthStaticPublicKey  string
+	AuthStaticKeyID      string
+	AuthAccessCookieName string
+	AuthPlainCookieName  string
+
 	IdempotencyTTL    time.Duration
 	RequestTimeout    time.Duration
 	DBTimeout         time.Duration
@@ -48,6 +59,13 @@ func Load() (*Config, error) {
 	cfg.HTTPAddr = env("BIZ_HTTP_ADDR", cfg.HTTPAddr)
 	cfg.Timezone = env("BIZ_TIMEZONE", cfg.Timezone)
 	cfg.AuthBaseURL = env("BIZ_AUTH_BASE_URL", cfg.AuthBaseURL)
+	cfg.AuthJWKSURL = env("BIZ_AUTH_JWKS_URL", strings.TrimRight(cfg.AuthBaseURL, "/")+"/v1/auth/jwks")
+	cfg.AuthIssuer = env("BIZ_AUTH_ISSUER", cfg.AuthIssuer)
+	cfg.AuthAudience = env("BIZ_AUTH_AUDIENCE", cfg.AuthAudience)
+	cfg.AuthStaticPublicKey = strings.TrimSpace(os.Getenv("BIZ_AUTH_JWKS_STATIC_PUBLIC_KEY"))
+	cfg.AuthStaticKeyID = strings.TrimSpace(os.Getenv("BIZ_AUTH_JWKS_STATIC_KEY_ID"))
+	cfg.AuthAccessCookieName = env("BIZ_AUTH_COOKIE_NAME", cfg.AuthAccessCookieName)
+	cfg.AuthPlainCookieName = env("BIZ_AUTH_PLAIN_COOKIE_NAME", cfg.AuthPlainCookieName)
 
 	if cfg.MySQLDSN == "" {
 		return nil, errors.New("BIZ_MYSQL_DSN is required")
@@ -98,6 +116,18 @@ func (c *Config) Validate() error {
 	if c.AuthTimeout <= 0 {
 		return errors.New("BIZ_AUTH_TIMEOUT must be positive")
 	}
+	if c.AuthJWKSURL == "" {
+		return errors.New("BIZ_AUTH_JWKS_URL must not be empty")
+	}
+	if parsed, err := url.Parse(c.AuthJWKSURL); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return errors.New("BIZ_AUTH_JWKS_URL must be an absolute http(s) URL")
+	}
+	if c.AuthIssuer == "" || c.AuthAudience == "" {
+		return errors.New("BIZ_AUTH_ISSUER and BIZ_AUTH_AUDIENCE must not be empty")
+	}
+	if c.AuthJWKSCacheTTL <= 0 {
+		return errors.New("BIZ_AUTH_JWKS_CACHE_TTL must be positive")
+	}
 	if c.DBMaxOpen < 1 || c.DBMaxIdle < 0 || c.DBMaxIdle > c.DBMaxOpen {
 		return errors.New("database pool sizes are invalid")
 	}
@@ -114,22 +144,29 @@ func (c *Config) Location() *time.Location {
 
 func defaults() *Config {
 	return &Config{
-		HTTPAddr:          "127.0.0.1:8080",
-		Timezone:          "Asia/Shanghai",
-		AuthBaseURL:       "http://127.0.0.1:8081",
-		AuthTimeout:       5 * time.Second,
-		IdempotencyTTL:    2160 * time.Hour,
-		RequestTimeout:    15 * time.Second,
-		DBTimeout:         5 * time.Second,
-		DBConnMaxLifetime: 30 * time.Minute,
-		DBMaxOpen:         10,
-		DBMaxIdle:         5,
-		LogLevel:          slog.LevelInfo,
+		HTTPAddr:             "127.0.0.1:8080",
+		Timezone:             "Asia/Shanghai",
+		AuthBaseURL:          "http://127.0.0.1:8081",
+		AuthJWKSURL:          "http://127.0.0.1:8081/v1/auth/jwks",
+		AuthTimeout:          5 * time.Second,
+		AuthIssuer:           "spendwise-auth",
+		AuthAudience:         "spendwise-api",
+		AuthJWKSCacheTTL:     5 * time.Minute,
+		AuthAccessCookieName: "__Host-sw_at",
+		AuthPlainCookieName:  "sw_at",
+		IdempotencyTTL:       2160 * time.Hour,
+		RequestTimeout:       15 * time.Second,
+		DBTimeout:            5 * time.Second,
+		DBConnMaxLifetime:    30 * time.Minute,
+		DBMaxOpen:            10,
+		DBMaxIdle:            5,
+		LogLevel:             slog.LevelInfo,
 	}
 }
 
 func parseDurations(c *Config) error {
 	c.AuthTimeout = durationEnv("BIZ_AUTH_TIMEOUT", c.AuthTimeout)
+	c.AuthJWKSCacheTTL = durationEnv("BIZ_AUTH_JWKS_CACHE_TTL", c.AuthJWKSCacheTTL)
 	c.IdempotencyTTL = durationEnv("BIZ_IDEMPOTENCY_TTL", c.IdempotencyTTL)
 	c.RequestTimeout = durationEnv("BIZ_REQUEST_TIMEOUT", c.RequestTimeout)
 	c.DBTimeout = durationEnv("BIZ_DB_TIMEOUT", c.DBTimeout)

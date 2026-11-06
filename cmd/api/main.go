@@ -13,6 +13,7 @@ import (
 
 	"github.com/mdhuser/spendwise-biz/internal/authclient"
 	"github.com/mdhuser/spendwise-biz/internal/httpserver"
+	"github.com/mdhuser/spendwise-biz/internal/identity"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	ledgerhttp "github.com/mdhuser/spendwise-biz/internal/ledger/http"
 	ledgermysql "github.com/mdhuser/spendwise-biz/internal/ledger/store/mysql"
@@ -40,12 +41,36 @@ func main() {
 	ledgerService := ledgerapp.New(database, ledgerStore, cfg)
 	ledgerHandler := ledgerhttp.New(ledgerService, cfg.Location())
 	authClient := authclient.New(cfg.AuthBaseURL, cfg.AuthTimeout)
+	verifier := identity.NewVerifier(identity.Config{
+		JWKSURL:         cfg.AuthJWKSURL,
+		Issuer:          cfg.AuthIssuer,
+		Audience:        cfg.AuthAudience,
+		CacheTTL:        cfg.AuthJWKSCacheTTL,
+		HTTPTimeout:     cfg.AuthTimeout,
+		StaticPublicKey: cfg.AuthStaticPublicKey,
+		StaticKeyID:     cfg.AuthStaticKeyID,
+	})
+	primeCtx, cancelPrime := context.WithTimeout(context.Background(), 5*time.Second)
+	primeErr := verifier.Prime(primeCtx)
+	cancelPrime()
+	if primeErr != nil {
+		// Do not exit: /readyz will stay 503 until JWKS loads, and an embedded
+		// static key can keep verification available during an auth outage.
+		logger.Warn("jwks_prime_failed", "url", cfg.AuthJWKSURL, "error", primeErr)
+	} else {
+		logger.Info("jwks_loaded", "url", cfg.AuthJWKSURL)
+	}
 
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpserver.New(
-			database, logger, ledgerService, ledgerHandler, authClient,
-			httpserver.Config{RequestTimeout: cfg.RequestTimeout, Timezone: cfg.Location()},
+			database, logger, ledgerService, ledgerHandler, authClient, verifier,
+			httpserver.Config{
+				RequestTimeout:  cfg.RequestTimeout,
+				Timezone:        cfg.Location(),
+				AuthCookieName:  cfg.AuthAccessCookieName,
+				PlainCookieName: cfg.AuthPlainCookieName,
+			},
 		).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -67,7 +92,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("server_started", "addr", cfg.HTTPAddr, "auth_base_url", cfg.AuthBaseURL)
+	logger.Info("server_started", "addr", cfg.HTTPAddr, "auth_base_url", cfg.AuthBaseURL, "jwks_url", cfg.AuthJWKSURL)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server_error", "error", err)
 		os.Exit(1)

@@ -6,7 +6,8 @@ SpendWise 的核心后端业务仓库。首期实现 `ledger` 模块：用户记
 
 - `spendwise-auth` 独占 `users`、`identities`、`verification_challenges`、`sessions`、`oauth_states`、`oauth_exchange_codes`，是唯一认证服务。
 - `spendwise-biz` 只拥有 ledger 表；`owner_id` / `actor_user_id` 保存 auth 的 `users.id` 字符串（`VARCHAR(191)`），但**没有跨服务外键**。
-- biz 不读取 auth 的 `users` / `sessions` 表。每个业务请求都通过 `GET {BIZ_AUTH_BASE_URL}/v1/auth/me` 校验 Bearer token：auth 返回 401 时 biz 返回 401，auth 5xx/网络错误时 biz 返回 `503 AUTH_UNAVAILABLE`。
+- biz 不读取 auth 的 `users` / `sessions` 表。M0 起优先本地验签 Ed25519 JWT：启动时加载 `BIZ_AUTH_JWKS_URL`，进程内缓存 5 分钟并用 ETag 条件请求刷新；只有本地验签失败时才回退 `GET {BIZ_AUTH_BASE_URL}/v1/auth/me`（兼容期）。JWT 路径每请求零 auth RTT；响应头 `X-Auth-Method: jwt|opaque` 可用于确认命中路径。
+- `/readyz` 同时检查 MySQL、迁移版本和 JWKS 是否已加载。启动时 JWKS 拉取失败会保持 503，直到成功或配置了 `BIZ_AUTH_JWKS_STATIC_PUBLIC_KEY` 兜底公钥。
 
 现有 Next.js/Prisma 应用仍在另一个仓库，继续使用 PostgreSQL；它与本服务只通过 HTTP/OpenAPI 协作。
 
@@ -16,7 +17,7 @@ SpendWise 的核心后端业务仓库。首期实现 `ledger` 模块：用户记
 - MySQL 8.4（最低 8.0.30），`database/sql` + `go-sql-driver/mysql`
 - `goose` 嵌入迁移（biz 使用独立的 `goose_db_version`；auth 使用 `schema_migrations`）
 - UUIDv7（资源 ID 使用 `BINARY(16)`）、`log/slog`
-- 模块化单体：`ledger` 业务模块 + `authclient` 认证适配层
+- 模块化单体：`ledger` 业务模块 + `identity` JWT 验签/JWKS 缓存 + `authclient` 旧 token 回退适配器
 
 ## 本地启动
 
@@ -67,10 +68,11 @@ CODE=$(python3 -c 'import sys,json; print(json.load(sys.stdin)["dev_code"])' <<<
 TOKEN=$(curl -s -X POST http://127.0.0.1:8081/v1/auth/email/verify \
   -H 'Content-Type: application/json' \
   -d "{\"challenge_id\":\"$CID\",\"code\":\"$CODE\"}" \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessToken"])')
 
-# 2. 查看业务服务自动创建的默认账户/分类
-curl -s http://127.0.0.1:8080/v1/ledger/accounts -H "Authorization: Bearer $TOKEN"
+# 2. 查看业务服务自动创建的默认账户/分类。
+#    -D 打印响应头：X-Auth-Method 应为 jwt（说明没有回调 /v1/auth/me）
+curl -s -D - http://127.0.0.1:8080/v1/ledger/accounts -H "Authorization: Bearer $TOKEN"
 curl -s http://127.0.0.1:8080/v1/ledger/categories -H "Authorization: Bearer $TOKEN"
 
 # 3. 记一笔支出（categoryId/accountId 用上一步返回的 ID）
@@ -123,7 +125,27 @@ curl -s "http://127.0.0.1:8080/v1/ledger/saving-goals/<goal-id>/achievements?fro
 - 幂等重放返回 HTTP 200 + `Idempotent-Replay: true`；同 key 不同请求返回 `409 IDEMPOTENCY_MISMATCH`。
 - 认证服务不可用时返回 `503 AUTH_UNAVAILABLE`，客户端应稍后重试而不是重新登录。
 
-完整契约见 `api/openapi/ledger.yaml`。
+完整契约见 `api/openapi/ledger.yaml`；认证契约见 `../spendwise-auth/api/openapi/auth.yaml`。
+
+### M0 认证验证
+
+```bash
+# JWKS 应返回带 kid 的 Ed25519 公钥和 ETag
+curl -i http://127.0.0.1:8081/v1/auth/jwks
+
+# JWT 路径：X-Auth-Method: jwt，且 auth 日志中不应出现对应的 /v1/auth/me
+curl -i http://127.0.0.1:8080/v1/ledger/accounts -H "Authorization: Bearer $TOKEN"
+
+# 旧 opaque token 路径仍可用（回退）：X-Auth-Method: opaque
+curl -i http://127.0.0.1:8080/v1/ledger/accounts -H "Authorization: Bearer $LEGACY_OPAQUE_TOKEN"
+
+# 刷新并轮换 refresh token（浏览器用 Cookie；命令行可直接传 body token）
+curl -i -X POST http://127.0.0.1:8081/v1/auth/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"refreshToken":"<refresh-token>"}'
+```
+
+生产必须设置 `BIZ_AUTH_JWKS_URL`、`BIZ_AUTH_ISSUER=spendwise-auth`、`BIZ_AUTH_AUDIENCE=spendwise-api`，并可选配置与 auth 活动公钥一致的 `BIZ_AUTH_JWKS_STATIC_PUBLIC_KEY` 兜底。JWKS 缓存 TTL 用 `BIZ_AUTH_JWKS_CACHE_TTL` 调整（默认 5m）。
 
 ## 模块结构
 
@@ -131,9 +153,10 @@ curl -s "http://127.0.0.1:8080/v1/ledger/saving-goals/<goal-id>/achievements?fro
 cmd/api        HTTP 服务
 cmd/migrate    goose 迁移（仅 ledger）
 cmd/admin      清理过期幂等记录
-internal/authclient 调用 spendwise-auth /v1/auth/me
+internal/identity   JWT 本地验签、JWKS 5m 缓存 + ETag、静态公钥兜底
+internal/authclient 旧 opaque token 回退（GET /v1/auth/me）
 internal/ledger     记账/目标/实现表
-internal/httpserver 路由装配、Bearer 校验、默认数据、日志、恢复
+internal/httpserver 路由装配、JWT-first 鉴权、/readyz、默认数据、日志、恢复
 internal/platform   config/db/httpx/apperr/id/migrate
 migrations/ledger   ledger 表
 ```
@@ -145,6 +168,7 @@ migrations/ledger   ledger 表
 - 首期只实现 `ledger`；购物编排、商品目录、平替/核算等尚未迁入。
 - 未实现 CSV 导入、转账、多币种、共享账本。
 - 业务进程内没有入口 IP 限流；限流应放在 BFF/反向代理。
+- 兼容期仍保留 opaque `/v1/auth/me` 回退；计划在旧 token 自然过期后删除（M6）。
 - 幂等采用同事务占位行：并发同 key 会等待首个请求提交后重放；`IDEMPOTENCY_IN_PROGRESS` 只在异常遗留 pending 行时出现，不是常规路径。
 - 标签目前只存取，不做筛选索引。
 - MySQL 没有部分索引，软删除行仍占索引空间；后续按数据量加归档/清理。

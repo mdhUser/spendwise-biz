@@ -12,11 +12,25 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mdhuser/spendwise-biz/internal/authclient"
+	"github.com/mdhuser/spendwise-biz/internal/identity"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	ledgerhttp "github.com/mdhuser/spendwise-biz/internal/ledger/http"
 	"github.com/mdhuser/spendwise-biz/internal/platform/apperr"
 	"github.com/mdhuser/spendwise-biz/internal/platform/httpx"
 )
+
+// Authenticator is the legacy opaque-token adapter. It is only consulted when
+// local JWT verification fails.
+type Authenticator interface {
+	Authenticate(context.Context, string) (authclient.User, error)
+}
+
+// AccessVerifier verifies Ed25519 access tokens with a cached JWKS.
+type AccessVerifier interface {
+	Verify(context.Context, string) (identity.Principal, error)
+	Ready() bool
+	Ensure(context.Context) error
+}
 
 type Server struct {
 	cfg           Config
@@ -24,20 +38,24 @@ type Server struct {
 	logger        *slog.Logger
 	ledgerService *ledgerapp.Service
 	ledgerHandler *ledgerhttp.Handler
-	authClient    *authclient.Client
+	authClient    Authenticator
+	verifier      AccessVerifier
 	defaultsReady sync.Map
 }
 
 type Config struct {
-	RequestTimeout time.Duration
-	Timezone       *time.Location
+	RequestTimeout  time.Duration
+	Timezone        *time.Location
+	AuthCookieName  string
+	PlainCookieName string
 }
 
 func New(database *sql.DB, logger *slog.Logger, ledgerService *ledgerapp.Service, ledgerHandler *ledgerhttp.Handler,
-	authClient *authclient.Client, cfg Config) *Server {
+	authClient Authenticator, verifier AccessVerifier, cfg Config) *Server {
 	return &Server{
 		cfg: cfg, db: database, logger: logger,
-		ledgerService: ledgerService, ledgerHandler: ledgerHandler, authClient: authClient,
+		ledgerService: ledgerService, ledgerHandler: ledgerHandler,
+		authClient: authClient, verifier: verifier,
 	}
 }
 
@@ -47,6 +65,16 @@ func (s *Server) Handler() http.Handler {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if s.verifier != nil && !s.verifier.Ready() {
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			err := s.verifier.Ensure(ctx)
+			cancel()
+			if err != nil || !s.verifier.Ready() {
+				s.logger.Warn("readiness_jwks_not_ready", "error", err)
+				httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "reason": "jwks"})
+				return
+			}
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if err := s.db.PingContext(ctx); err != nil {
@@ -64,7 +92,9 @@ func (s *Server) Handler() http.Handler {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
-	s.ledgerHandler.Register(mux, s.requireAuth)
+	if s.ledgerHandler != nil {
+		s.ledgerHandler.Register(mux, s.requireAuth)
+	}
 
 	var handler http.Handler = mux
 	handler = s.recover(handler)
@@ -76,18 +106,51 @@ func (s *Server) Handler() http.Handler {
 	return handler
 }
 
-// requireAuth introspects the bearer token with spendwise-auth. The auth
-// service is the only identity provider: biz never reads auth users/sessions
-// tables. A rejected token becomes 401; any auth transport/5xx failure becomes
-// 503 so clients can distinguish "log in again" from "try again later".
+// requireAuth verifies the access token locally first (Ed25519 JWT + cached
+// JWKS). Only when that fails does it fall back to the legacy opaque
+// /v1/auth/me call. The auth service is the only identity provider: biz never
+// reads auth users/sessions tables. A rejected token becomes 401; a transport
+// or auth 5xx failure on the fallback becomes 503.
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := strings.TrimSpace(r.Header.Get("Authorization"))
-		if len(header) < 7 || !strings.EqualFold(header[:6], "Bearer") || header[6] != ' ' {
+		token := bearerToken(r)
+		if token == "" {
+			for _, name := range []string{s.cfg.AuthCookieName, s.cfg.PlainCookieName} {
+				if name == "" {
+					continue
+				}
+				if cookie, err := r.Cookie(name); err == nil && cookie.Value != "" {
+					token = cookie.Value
+					break
+				}
+			}
+		}
+		if token == "" {
 			httpx.WriteError(w, r, apperr.Unauthenticated("请先登录"))
 			return
 		}
-		token := strings.TrimSpace(header[7:])
+
+		if s.verifier != nil {
+			principal, err := s.verifier.Verify(r.Context(), token)
+			if err == nil {
+				user := authclient.User{ID: principal.ID, UserType: "registered", Status: "active"}
+				if principal.Name != "" {
+					name := principal.Name
+					user.DisplayName = &name
+				}
+				w.Header().Set("X-Auth-Method", "jwt")
+				s.ensureDefaults(r.Context(), user.ID)
+				ctx := authclient.WithUser(r.Context(), user)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+			s.logger.Debug("jwt_verify_failed", "request_id", httpx.RequestID(r.Context()), "error", err)
+		}
+
+		if s.authClient == nil {
+			httpx.WriteError(w, r, apperr.Unauthenticated("登录已失效，请重新登录"))
+			return
+		}
 		user, err := s.authClient.Authenticate(r.Context(), token)
 		if err != nil {
 			if errors.Is(err, authclient.ErrUnauthenticated) {
@@ -98,15 +161,27 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			httpx.WriteError(w, r, apperr.New(http.StatusServiceUnavailable, "AUTH_UNAVAILABLE", "认证服务暂时不可用，请稍后再试"))
 			return
 		}
+		w.Header().Set("X-Auth-Method", "opaque")
 		s.ensureDefaults(r.Context(), user.ID)
 		next.ServeHTTP(w, r.WithContext(authclient.WithUser(r.Context(), user)))
 	})
+}
+
+func bearerToken(r *http.Request) string {
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(header) < 7 || !strings.EqualFold(header[:6], "Bearer") || header[6] != ' ' {
+		return ""
+	}
+	return strings.TrimSpace(header[7:])
 }
 
 // ensureDefaults creates the starter accounts/categories once per user per
 // process. It is best effort: a failure is logged and retried on the next
 // request, but it never turns an otherwise valid login into an error.
 func (s *Server) ensureDefaults(ctx context.Context, ownerID string) {
+	if s.ledgerService == nil {
+		return
+	}
 	if _, ok := s.defaultsReady.Load(ownerID); ok {
 		return
 	}
