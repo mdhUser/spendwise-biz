@@ -157,7 +157,8 @@ internal/identity   JWT 本地验签、JWKS 5m 缓存 + ETag、静态公钥兜�
 internal/authclient 旧 opaque token 回退（GET /v1/auth/me）
 internal/ledger     记账/目标/实现表
 internal/httpserver 路由装配、JWT-first 鉴权、/readyz、默认数据、日志、恢复
-internal/platform   config/db/httpx/apperr/id/migrate
+internal/platform   config/db/httpx/apperr/id/migrate/ratelimit
+docs/data-ownership.md  表所有权与模块边界（唯一登记处）
 migrations/ledger   ledger 表
 ```
 
@@ -165,7 +166,8 @@ migrations/ledger   ledger 表
 
 ## 当前限制
 
-- 首期只实现 `ledger`；购物编排、商品目录、平替/核算等尚未迁入。
+- 首期只实现 `ledger`；购物编排、商品目录、平替/核算将在 M2/M3 迁入。
+- M1 已固化模块边界与表所有权，见 [`docs/data-ownership.md`](docs/data-ownership.md)。
 - 未实现 CSV 导入、转账、多币种、共享账本。
 - 业务进程内没有入口 IP 限流；限流应放在 BFF/反向代理。
 - 兼容期仍保留 opaque `/v1/auth/me` 回退；计划在旧 token 自然过期后删除（M6）。
