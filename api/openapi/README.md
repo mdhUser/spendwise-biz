@@ -7,8 +7,8 @@ visible in review:
 | File | Owner | Status |
 | --- | --- | --- |
 | `ledger.yaml` | ledger | existing M1 contract |
-| `catalog.yaml` | catalog | M2 |
-| `conversation.yaml` | conversation | M2 |
+| `catalog.yaml` | catalog | M2 — categories, products, SKUs, quotes, library |
+| `conversation.yaml` | conversation | M2 — conversations, messages |
 | `runs.yaml` | conversation/jobs | M3 |
 | `spendwise.yaml` | umbrella (external `$ref`s) | M3 |
 

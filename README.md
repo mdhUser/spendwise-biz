@@ -1,6 +1,6 @@
 # spendwise-biz
 
-SpendWise 的核心后端业务仓库。首期实现 `ledger` 模块：用户记账、账户/分类、支出/收入/退款流水、汇总，以及「开支节省目标实现表」。
+SpendWise 的核心后端业务仓库。已实现 `ledger` 模块（记账、账户/分类、流水、汇总、节省目标实现表），以及 M2 的 `catalog`（用户品类/商品/SKU/人工报价/个人清单）和 `conversation`（会话、消息、限流）模块。
 
 认证由独立仓库 [`spendwise-auth`](../spendwise-auth) 负责。两个服务共用同一个 **MySQL 8.4** 数据库 `spendwise`：
 
@@ -17,7 +17,7 @@ SpendWise 的核心后端业务仓库。首期实现 `ledger` 模块：用户记
 - MySQL 8.4（最低 8.0.30），`database/sql` + `go-sql-driver/mysql`
 - `goose` 嵌入迁移（biz 使用独立的 `goose_db_version`；auth 使用 `schema_migrations`）
 - UUIDv7（资源 ID 使用 `BINARY(16)`）、`log/slog`
-- 模块化单体：`ledger` 业务模块 + `identity` JWT 验签/JWKS 缓存 + `authclient` 旧 token 回退适配器
+- 模块化单体：`ledger` / `catalog` / `conversation` 业务模块 + `identity` JWT 验签/JWKS 缓存 + `authclient` 旧 token 回退适配器
 
 ## 本地启动
 
@@ -113,6 +113,20 @@ curl -s "http://127.0.0.1:8080/v1/ledger/saving-goals/<goal-id>/achievements?fro
 | POST | `/v1/ledger/saving-goals/{id}/terms` | 新增条款（下一期起） |
 | GET | `/v1/ledger/saving-goals/{id}/achievements` | 实现表 |
 | GET | `/v1/ledger/saving-goals/overview` | 当前月多目标概览 |
+| GET/POST | `/v1/catalog/categories` | 用户品类列表/创建 |
+| PATCH/DELETE | `/v1/catalog/categories/{id}` | 更新/删除品类 |
+| GET/POST | `/v1/catalog/products` | 商品列表/创建 |
+| GET/PATCH/DELETE | `/v1/catalog/products/{id}` | 商品详情/更新/删除 |
+| GET/POST | `/v1/catalog/products/{id}/skus` | SKU 列表/创建（可带首次报价） |
+| PATCH/DELETE | `/v1/catalog/skus/{id}` | 更新/删除 SKU |
+| POST | `/v1/catalog/skus/{id}/quotes` | 追加人工报价快照 |
+| GET | `/v1/library` | 批量返回品类/商品/SKU/最新报价 |
+| GET/POST | `/v1/library/items` | 个人清单条目 |
+| DELETE | `/v1/library/items/{id}` | 删除清单条目 |
+| GET/POST | `/v1/conversations` | 会话列表/创建 |
+| GET/DELETE | `/v1/conversations/{id}` | 会话详情（含消息）/删除 |
+| DELETE | `/v1/conversations` | 删除全部会话 |
+| GET/POST | `/v1/conversations/{id}/messages` | 消息列表/追加用户消息 |
 
 认证接口（`/v1/auth/*`）全部由 `spendwise-auth` 提供，biz 不再暴露。
 
@@ -156,18 +170,26 @@ cmd/admin      清理过期幂等记录
 internal/identity   JWT 本地验签、JWKS 5m 缓存 + ETag、静态公钥兜底
 internal/authclient 旧 opaque token 回退（GET /v1/auth/me）
 internal/ledger     记账/目标/实现表
+internal/catalog    用户品类/商品/SKU/报价/清单
+internal/conversation 会话/消息（M3 在其上增加 run 与 SSE）
+internal/platform/ratelimit MySQL 固定窗口限流（多副本共享）
 internal/httpserver 路由装配、JWT-first 鉴权、/readyz、默认数据、日志、恢复
 internal/platform   config/db/httpx/apperr/id/migrate/ratelimit
 docs/data-ownership.md  表所有权与模块边界（唯一登记处）
-migrations/ledger   ledger 表
+migrations/ledger       ledger 表
+migrations/catalog      catalog_* 表
+migrations/conversation conv_* 表
+migrations/platform     rate_buckets / async_jobs
 ```
 
 后续核心业务按 `internal/<module>/{domain,app,store,http}` 扩展；模块间不允许直接读写对方表或跨模块 JOIN。MySQL 中表按模块划分所有权，后续模块使用模块前缀。
 
 ## 当前限制
 
-- 首期只实现 `ledger`；购物编排、商品目录、平替/核算将在 M2/M3 迁入。
+- M2 已迁入 catalog/conversation 的核心 CRUD 与限流；异步 run、worker、SSE、provider/LLM 在 M3 迁入。
 - M1 已固化模块边界与表所有权，见 [`docs/data-ownership.md`](docs/data-ownership.md)。
+- `catalog_products`/`catalog_offers` 为公共目录预留，M2 不暴露写接口；匿名用户数据默认不迁移。
+- 商品/SKU 删除为硬删除（同模块级联），与旧 Prisma 行为一致；会话 30 天过期。
 - 未实现 CSV 导入、转账、多币种、共享账本。
 - 业务进程内没有入口 IP 限流；限流应放在 BFF/反向代理。
 - 兼容期仍保留 opaque `/v1/auth/me` 回退；计划在旧 token 自然过期后删除（M6）。
@@ -188,7 +210,7 @@ go build ./...
 真实 MySQL 集成测试：
 
 ```bash
-BIZ_TEST_MYSQL_DSN='root:root@tcp(127.0.0.1:3306)/spendwise_test?parseTime=true&loc=UTC' go test ./internal/httpserver -run TestMySQLIntegration -v
+BIZ_TEST_MYSQL_DSN='root:root@tcp(127.0.0.1:3306)/spendwise_test?parseTime=true&loc=UTC' go test ./internal/httpserver -v
 ```
 
 清理过期幂等记录（可由 cron 调用）：

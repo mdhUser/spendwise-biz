@@ -17,6 +17,12 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/mdhuser/spendwise-biz/internal/authclient"
+	catalogapp "github.com/mdhuser/spendwise-biz/internal/catalog/app"
+	cataloghttp "github.com/mdhuser/spendwise-biz/internal/catalog/http"
+	catalogmysql "github.com/mdhuser/spendwise-biz/internal/catalog/store/mysql"
+	conversationapp "github.com/mdhuser/spendwise-biz/internal/conversation/app"
+	conversationhttp "github.com/mdhuser/spendwise-biz/internal/conversation/http"
+	conversationmysql "github.com/mdhuser/spendwise-biz/internal/conversation/store/mysql"
 	"github.com/mdhuser/spendwise-biz/internal/httpserver"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	ledgerhttp "github.com/mdhuser/spendwise-biz/internal/ledger/http"
@@ -24,6 +30,7 @@ import (
 	"github.com/mdhuser/spendwise-biz/internal/platform/config"
 	"github.com/mdhuser/spendwise-biz/internal/platform/db"
 	"github.com/mdhuser/spendwise-biz/internal/platform/migrate"
+	"github.com/mdhuser/spendwise-biz/internal/platform/ratelimit"
 )
 
 // TestMySQLIntegration exercises the real HTTP stack and ledger schema against
@@ -349,6 +356,215 @@ func TestMySQLIntegration(t *testing.T) {
 	decodeJSON(t, body, &list)
 	if len(list.Items) != 0 {
 		t.Fatalf("user B transaction list has %d items, want 0", len(list.Items))
+	}
+}
+
+// TestCatalogConversationMySQLIntegration covers the M2 modules against a real
+// MySQL schema: module-owned migrations, owner isolation, idempotent creates,
+// unknown-price semantics, conversation messages and rate-limit headers.
+func TestCatalogConversationMySQLIntegration(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("BIZ_TEST_MYSQL_DSN"))
+	if dsn == "" {
+		t.Skip("BIZ_TEST_MYSQL_DSN is not set; skipping MySQL integration test")
+	}
+	dsnCfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("parse BIZ_TEST_MYSQL_DSN: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(dsnCfg.DBName), "test") {
+		t.Fatalf("refusing to run integration test against database %q: name must contain \"test\"", dsnCfg.DBName)
+	}
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	userA := "m2-user-a-" + suffix
+	userB := "m2-user-b-" + suffix
+	tokens := map[string]string{"token-a": userA, "token-b": userB}
+
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/me" {
+			http.NotFound(w, r)
+			return
+		}
+		token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		userID, ok := tokens[token]
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"authentication required"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"id": userID, "status": "active"}})
+	}))
+	t.Cleanup(fakeAuth.Close)
+
+	t.Setenv("BIZ_MYSQL_DSN", dsn)
+	t.Setenv("BIZ_MIGRATION_DSN", dsn)
+	t.Setenv("BIZ_AUTH_BASE_URL", fakeAuth.URL)
+	t.Setenv("BIZ_HTTP_ADDR", "127.0.0.1:0")
+	t.Setenv("BIZ_AUTH_TIMEOUT", "2s")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	database, err := db.Open(cfg)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := migrate.Apply(ctx, database); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	t.Cleanup(func() { cleanupM2Data(t, database, []string{userA, userB}) })
+
+	ledgerStore := ledgermysql.New(database)
+	ledgerService := ledgerapp.New(database, ledgerStore, cfg)
+	ledgerHandler := ledgerhttp.New(ledgerService, cfg.Location())
+	catalogHandler := cataloghttp.New(catalogapp.New(catalogmysql.New(database)))
+	conversationHandler := conversationhttp.New(conversationapp.New(conversationmysql.New(database)), ratelimit.New(database))
+	server := httptest.NewServer(httpserver.New(
+		database, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ledgerService, ledgerHandler, authclient.New(cfg.AuthBaseURL, cfg.AuthTimeout), nil,
+		httpserver.Config{RequestTimeout: cfg.RequestTimeout, Timezone: cfg.Location()},
+		catalogHandler, conversationHandler,
+	).Handler())
+	t.Cleanup(server.Close)
+	client := server.Client()
+	client.Timeout = 20 * time.Second
+
+	// Category create + idempotent replay + mismatch.
+	status, _, body := doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/categories", "token-a", "m2-cat-"+suffix, map[string]any{"name": "露营"})
+	requireStatus(t, status, http.StatusCreated, body)
+	var category idResponse
+	decodeJSON(t, body, &category)
+	if category.ID == "" || category.Version != 1 {
+		t.Fatalf("category = %+v", category)
+	}
+	status, headers, replayBody := doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/categories", "token-a", "m2-cat-"+suffix, map[string]any{"name": "露营"})
+	requireStatus(t, status, http.StatusOK, replayBody)
+	if headers.Get("Idempotent-Replay") != "true" {
+		t.Fatalf("Idempotent-Replay = %q", headers.Get("Idempotent-Replay"))
+	}
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/categories", "token-a", "m2-cat-"+suffix, map[string]any{"name": "其他"})
+	requireStatus(t, status, http.StatusConflict, body)
+	requireErrorCode(t, body, "IDEMPOTENCY_MISMATCH")
+
+	// Product + SKU with an unknown shipping value.
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/products", "token-a", "m2-prod-"+suffix, map[string]any{"title": "折叠椅", "categoryId": category.ID})
+	requireStatus(t, status, http.StatusCreated, body)
+	var product idResponse
+	decodeJSON(t, body, &product)
+	if product.ID == "" || product.Version != 1 {
+		t.Fatalf("product = %+v", product)
+	}
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/products/"+product.ID+"/skus", "token-a", "m2-sku-"+suffix, map[string]any{
+		"displayName": "黑色",
+		"attributes": map[string]any{
+			"weight": map[string]any{"type": "number", "value": 2.5, "unit": "kg"},
+		},
+		"quote": map[string]any{"priceFen": 12900, "shippingFen": nil},
+	})
+	requireStatus(t, status, http.StatusCreated, body)
+	var sku struct {
+		ID      string `json:"id"`
+		Version int    `json:"version"`
+		Quotes  []struct {
+			PriceFen    *int64 `json:"priceFen"`
+			ShippingFen *int64 `json:"shippingFen"`
+			PriceKind   string `json:"priceKind"`
+		} `json:"quotes"`
+	}
+	decodeJSON(t, body, &sku)
+	if sku.ID == "" || sku.Version != 1 || len(sku.Quotes) != 1 {
+		t.Fatalf("sku = %+v", sku)
+	}
+	if sku.Quotes[0].PriceFen == nil || *sku.Quotes[0].PriceFen != 12900 || sku.Quotes[0].PriceKind != "exact" {
+		t.Fatalf("quote = %+v", sku.Quotes[0])
+	}
+	if sku.Quotes[0].ShippingFen != nil {
+		t.Fatalf("unknown shipping must stay nil, got %d", *sku.Quotes[0].ShippingFen)
+	}
+
+	// Library view + cross-owner isolation.
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/library", "token-a", "", nil)
+	requireStatus(t, status, http.StatusOK, body)
+	var library struct {
+		Categories []json.RawMessage `json:"categories"`
+		Products   []struct {
+			ID   string `json:"id"`
+			SKUs []struct {
+				ID     string            `json:"id"`
+				Quotes []json.RawMessage `json:"quotes"`
+			} `json:"skus"`
+		} `json:"products"`
+	}
+	decodeJSON(t, body, &library)
+	if len(library.Categories) != 1 || len(library.Products) != 1 || len(library.Products[0].SKUs) != 1 || len(library.Products[0].SKUs[0].Quotes) != 1 {
+		t.Fatalf("library = %+v", library)
+	}
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/catalog/products/"+product.ID, "token-b", "", nil)
+	requireStatus(t, status, http.StatusNotFound, body)
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/products", "token-b", "m2-cross-"+suffix, map[string]any{"title": "越权", "categoryId": category.ID})
+	requireStatus(t, status, http.StatusUnprocessableEntity, body)
+
+	// Conversation + message + replay + owner isolation.
+	status, headers, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/conversations", "token-a", "m2-conv-"+suffix, map[string]any{"title": "比较"})
+	requireStatus(t, status, http.StatusCreated, body)
+	if headers.Get("RateLimit-Limit") == "" {
+		t.Fatal("RateLimit-Limit header is missing")
+	}
+	var conversation idResponse
+	decodeJSON(t, body, &conversation)
+	if conversation.ID == "" || conversation.Version != 1 {
+		t.Fatalf("conversation = %+v", conversation)
+	}
+	messageURL := server.URL + "/v1/conversations/" + conversation.ID + "/messages"
+	status, _, body = doJSON(t, client, http.MethodPost, messageURL, "token-a", "m2-msg-"+suffix, map[string]any{"content": "帮我比较一下"})
+	requireStatus(t, status, http.StatusCreated, body)
+	status, headers, replayBody = doJSON(t, client, http.MethodPost, messageURL, "token-a", "m2-msg-"+suffix, map[string]any{"content": "帮我比较一下"})
+	requireStatus(t, status, http.StatusOK, replayBody)
+	if headers.Get("Idempotent-Replay") != "true" {
+		t.Fatal("message replay header missing")
+	}
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/conversations/"+conversation.ID, "token-a", "", nil)
+	requireStatus(t, status, http.StatusOK, body)
+	var detail struct {
+		Conversation struct {
+			Asks    int `json:"asks"`
+			Version int `json:"version"`
+		} `json:"conversation"`
+		Messages []json.RawMessage `json:"messages"`
+	}
+	decodeJSON(t, body, &detail)
+	if detail.Conversation.Asks != 1 || detail.Conversation.Version != 2 || len(detail.Messages) != 1 {
+		t.Fatalf("detail = %+v", detail)
+	}
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/conversations/"+conversation.ID, "token-b", "", nil)
+	requireStatus(t, status, http.StatusNotFound, body)
+	status, _, body = doJSON(t, client, http.MethodDelete, server.URL+"/v1/conversations/"+conversation.ID, "token-a", "", nil)
+	requireStatus(t, status, http.StatusNoContent, body)
+}
+
+func cleanupM2Data(t *testing.T, database *sql.DB, ownerIDs []string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, owner := range ownerIDs {
+		for _, query := range []string{
+			`DELETE FROM conv_conversations WHERE owner_id = ?`,
+			`DELETE FROM catalog_quote_snapshots WHERE owner_id = ?`,
+			`DELETE FROM catalog_user_skus WHERE owner_id = ?`,
+			`DELETE FROM catalog_user_products WHERE owner_id = ?`,
+			`DELETE FROM catalog_user_categories WHERE owner_id = ?`,
+			`DELETE FROM catalog_user_items WHERE owner_id = ?`,
+			`DELETE FROM rate_buckets WHERE bucket_key LIKE CONCAT('%', ?, '%')`,
+		} {
+			if _, err := database.ExecContext(ctx, query, owner); err != nil {
+				t.Errorf("cleanup %q for %s: %v", query, owner, err)
+			}
+		}
 	}
 }
 

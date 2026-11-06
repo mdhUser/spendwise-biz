@@ -32,6 +32,12 @@ type AccessVerifier interface {
 	Ensure(context.Context) error
 }
 
+// Registrar lets a business module register its routes without leaking its
+// concrete handler type into the server assembly.
+type Registrar interface {
+	Register(*http.ServeMux, func(http.Handler) http.Handler)
+}
+
 type Server struct {
 	cfg           Config
 	db            *sql.DB
@@ -40,6 +46,7 @@ type Server struct {
 	ledgerHandler *ledgerhttp.Handler
 	authClient    Authenticator
 	verifier      AccessVerifier
+	modules       []Registrar
 	defaultsReady sync.Map
 }
 
@@ -51,11 +58,11 @@ type Config struct {
 }
 
 func New(database *sql.DB, logger *slog.Logger, ledgerService *ledgerapp.Service, ledgerHandler *ledgerhttp.Handler,
-	authClient Authenticator, verifier AccessVerifier, cfg Config) *Server {
+	authClient Authenticator, verifier AccessVerifier, cfg Config, modules ...Registrar) *Server {
 	return &Server{
 		cfg: cfg, db: database, logger: logger,
 		ledgerService: ledgerService, ledgerHandler: ledgerHandler,
-		authClient: authClient, verifier: verifier,
+		authClient: authClient, verifier: verifier, modules: modules,
 	}
 }
 
@@ -94,6 +101,11 @@ func (s *Server) Handler() http.Handler {
 
 	if s.ledgerHandler != nil {
 		s.ledgerHandler.Register(mux, s.requireAuth)
+	}
+	for _, module := range s.modules {
+		if module != nil {
+			module.Register(mux, s.requireAuth)
+		}
 	}
 
 	var handler http.Handler = mux

@@ -1,0 +1,221 @@
+openapi: 3.1.0
+info:
+  title: SpendWise Conversation API
+  version: 0.1.0
+  description: |
+    Conversation module (M2): owner-scoped conversations and messages. Runs and
+    SSE are added by the M3 `runs.yaml` contract. Conversations expire after 30
+    days; deletion cascades messages within the module.
+
+    Create endpoints require `Idempotency-Key`; replays return 200 with
+    `Idempotent-Replay: true`.
+servers:
+  - url: /
+tags:
+  - name: conversation
+paths:
+  /v1/conversations:
+    get:
+      tags: [conversation]
+      operationId: listConversations
+      parameters:
+        - in: query
+          name: cursor
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: Conversations ordered by recent activity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Conversation" }
+                  nextCursor: { type: [string, "null"] }
+    post:
+      tags: [conversation]
+      operationId: createConversation
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  maxLength: 120
+                  default: 新的选购
+      responses:
+        "201":
+          description: Created
+          headers:
+            RateLimit-Limit: { schema: { type: integer } }
+            RateLimit-Remaining: { schema: { type: integer } }
+            RateLimit-Reset: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Conversation" }
+        "200":
+          description: Idempotent replay
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Conversation" }
+        "409":
+          description: Idempotency mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Rate limited (30 new conversations per 24h)
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [conversation]
+      operationId: deleteAllConversations
+      responses:
+        "204": { description: All conversations of the caller deleted }
+  /v1/conversations/{id}:
+    parameters: [{ $ref: "#/components/parameters/PathID" }]
+    get:
+      tags: [conversation]
+      operationId: getConversation
+      parameters:
+        - in: query
+          name: limit
+          description: Maximum messages returned (newest kept, chronological order).
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        "200":
+          description: Conversation detail with messages
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversation, messages]
+                properties:
+                  conversation: { $ref: "#/components/schemas/Conversation" }
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [conversation]
+      operationId: deleteConversation
+      responses:
+        "204": { description: Deleted; messages cascade }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/conversations/{id}/messages:
+    parameters: [{ $ref: "#/components/parameters/PathID" }]
+    get:
+      tags: [conversation]
+      operationId: listMessages
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        "200":
+          description: Messages in chronological order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [conversation]
+      operationId: createMessage
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, minLength: 1, maxLength: 4000 }
+      responses:
+        "201":
+          description: Message appended (role=user)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "200":
+          description: Idempotent replay
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429":
+          description: Rate limited (120 messages per 24h)
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+components:
+  parameters:
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 128 }
+    PathID:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    NotFound:
+      description: Not found, expired or not owned by the caller
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string }
+    Conversation:
+      type: object
+      required: [id, title, asks, version, expiresAt, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        asks: { type: integer }
+        version: { type: integer }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Message:
+      type: object
+      required: [id, conversationId, role, content, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        conversationId: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant, system] }
+        content: { type: string }
+        createdAt: { type: string, format: date-time }

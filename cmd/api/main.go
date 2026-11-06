@@ -12,6 +12,12 @@ import (
 	_ "time/tzdata"
 
 	"github.com/mdhuser/spendwise-biz/internal/authclient"
+	catalogapp "github.com/mdhuser/spendwise-biz/internal/catalog/app"
+	cataloghttp "github.com/mdhuser/spendwise-biz/internal/catalog/http"
+	catalogmysql "github.com/mdhuser/spendwise-biz/internal/catalog/store/mysql"
+	conversationapp "github.com/mdhuser/spendwise-biz/internal/conversation/app"
+	conversationhttp "github.com/mdhuser/spendwise-biz/internal/conversation/http"
+	conversationmysql "github.com/mdhuser/spendwise-biz/internal/conversation/store/mysql"
 	"github.com/mdhuser/spendwise-biz/internal/httpserver"
 	"github.com/mdhuser/spendwise-biz/internal/identity"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
@@ -19,6 +25,7 @@ import (
 	ledgermysql "github.com/mdhuser/spendwise-biz/internal/ledger/store/mysql"
 	"github.com/mdhuser/spendwise-biz/internal/platform/config"
 	"github.com/mdhuser/spendwise-biz/internal/platform/db"
+	"github.com/mdhuser/spendwise-biz/internal/platform/ratelimit"
 )
 
 func main() {
@@ -40,6 +47,16 @@ func main() {
 	ledgerStore := ledgermysql.New(database)
 	ledgerService := ledgerapp.New(database, ledgerStore, cfg)
 	ledgerHandler := ledgerhttp.New(ledgerService, cfg.Location())
+
+	catalogStore := catalogmysql.New(database)
+	catalogService := catalogapp.New(catalogStore)
+	catalogHandler := cataloghttp.New(catalogService)
+
+	conversationStore := conversationmysql.New(database)
+	conversationService := conversationapp.New(conversationStore)
+	limiter := ratelimit.New(database)
+	conversationHandler := conversationhttp.New(conversationService, limiter)
+
 	authClient := authclient.New(cfg.AuthBaseURL, cfg.AuthTimeout)
 	verifier := identity.NewVerifier(identity.Config{
 		JWKSURL:         cfg.AuthJWKSURL,
@@ -71,6 +88,8 @@ func main() {
 				AuthCookieName:  cfg.AuthAccessCookieName,
 				PlainCookieName: cfg.AuthPlainCookieName,
 			},
+			catalogHandler,
+			conversationHandler,
 		).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,

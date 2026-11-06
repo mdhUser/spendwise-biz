@@ -1,0 +1,541 @@
+openapi: 3.1.0
+info:
+  title: SpendWise Catalog & Library API
+  version: 0.1.0
+  description: |
+    Catalog module (M2). User categories, products, SKUs and manual quote
+    snapshots. Money is integer fen; `priceFen`/`shippingFen` are nullable and
+    null means unknown, never zero. All resources are owner-scoped; cross-user
+    access returns 404.
+
+    Create endpoints require `Idempotency-Key` (8-128 chars). Replays return
+    200 with `Idempotent-Replay: true`; the same key with a different payload
+    returns 409 `IDEMPOTENCY_MISMATCH`.
+servers:
+  - url: /
+tags:
+  - name: catalog
+  - name: library
+paths:
+  /v1/catalog/categories:
+    get:
+      tags: [catalog]
+      operationId: listCategories
+      responses:
+        "200":
+          description: Categories ordered by sortOrder/id
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Category" }
+                  categories:
+                    type: array
+                    items: { $ref: "#/components/schemas/Category" }
+    post:
+      tags: [catalog]
+      operationId: createCategory
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Category" }
+        "200":
+          description: Idempotent replay
+          headers:
+            Idempotent-Replay: { schema: { type: string, const: "true" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Category" }
+        "409":
+          description: Duplicate name or idempotency mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/catalog/categories/{id}:
+    parameters: [{ $ref: "#/components/parameters/PathID" }]
+    patch:
+      tags: [catalog]
+      operationId: updateCategory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, version]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Category" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Duplicate name or version conflict
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [catalog]
+      operationId: deleteCategory
+      description: Detaches products to uncategorized, then deletes the category.
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/catalog/products:
+    get:
+      tags: [catalog]
+      operationId: listProducts
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - in: query
+          name: categoryId
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Keyset-paginated products
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Product" }
+                  nextCursor:
+                    type: [string, "null"]
+    post:
+      tags: [catalog]
+      operationId: createProduct
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 120 }
+                categoryId: { type: [string, "null"], format: uuid }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "200":
+          description: Idempotent replay
+          headers:
+            Idempotent-Replay: { schema: { type: string, const: "true" } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "409":
+          description: Idempotency mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Validation error / category not owned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/catalog/products/{id}:
+    parameters: [{ $ref: "#/components/parameters/PathID" }]
+    get:
+      tags: [catalog]
+      operationId: getProduct
+      responses:
+        "200":
+          description: Product with SKUs and latest quotes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [catalog]
+      operationId: updateProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, categoryId, version]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 120 }
+                categoryId: { type: [string, "null"], format: uuid }
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/VersionConflict" }
+    delete:
+      tags: [catalog]
+      operationId: deleteProduct
+      responses:
+        "204": { description: Deleted; SKUs/quotes cascade }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/catalog/products/{id}/skus:
+    parameters: [{ $ref: "#/components/parameters/PathID" }]
+    get:
+      tags: [catalog]
+      operationId: listSKUs
+      responses:
+        "200":
+          description: SKUs with latest quotes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/SKU" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [catalog]
+      operationId: createSKU
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 120 }
+                attributes: { $ref: "#/components/schemas/Attributes" }
+                quote: { $ref: "#/components/schemas/QuoteInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SKU" }
+        "200":
+          description: Idempotent replay
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SKU" }
+        "409":
+          description: Idempotency mismatch
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Attribute/quote validation error, or 20-SKU limit
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/catalog/skus/{id}:
+    parameters: [{ $ref: "#/components/parameters/PathID" }]
+    patch:
+      tags: [catalog]
+      operationId: updateSKU
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 120 }
+                attributes: { $ref: "#/components/schemas/Attributes" }
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SKU" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/VersionConflict" }
+    delete:
+      tags: [catalog]
+      operationId: deleteSKU
+      responses:
+        "204": { description: Deleted; quotes cascade }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/catalog/skus/{id}/quotes:
+    parameters: [{ $ref: "#/components/parameters/PathID" }]
+    post:
+      tags: [catalog]
+      operationId: createQuote
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QuoteInput" }
+      responses:
+        "201":
+          description: Quote snapshot created (24h TTL)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Quote" }
+        "200":
+          description: Idempotent replay
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Quote" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: Invalid amount or sourceUrl
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/library:
+    get:
+      tags: [library]
+      operationId: getLibrary
+      description: Batched library view (categories + products + SKUs + latest quotes).
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Library page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [categories, products, nextCursor]
+                properties:
+                  categories:
+                    type: array
+                    items: { $ref: "#/components/schemas/Category" }
+                  products:
+                    type: array
+                    items: { $ref: "#/components/schemas/Product" }
+                  nextCursor:
+                    type: [string, "null"]
+  /v1/library/items:
+    get:
+      tags: [library]
+      operationId: listLibraryItems
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Free-form personal library items
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Item" }
+                  nextCursor:
+                    type: [string, "null"]
+    post:
+      tags: [library]
+      operationId: createLibraryItem
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 120 }
+                payload:
+                  type: object
+                  description: Free-form JSON, max 32 KiB.
+                  additionalProperties: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+        "200":
+          description: Idempotent replay
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+  /v1/library/items/{id}:
+    parameters: [{ $ref: "#/components/parameters/PathID" }]
+    delete:
+      tags: [library]
+      operationId: deleteLibraryItem
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+components:
+  parameters:
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: true
+      schema: { type: string, minLength: 8, maxLength: 128 }
+    Cursor:
+      in: query
+      name: cursor
+      schema: { type: string }
+    Limit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    PathID:
+      in: path
+      name: id
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    NotFound:
+      description: Not found or not owned by the caller
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    VersionConflict:
+      description: Stale version
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string }
+    Category:
+      type: object
+      required: [id, name, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        version: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Product:
+      type: object
+      required: [id, title, collectionState, version, expiresAt, skus]
+      properties:
+        id: { type: string, format: uuid }
+        categoryId: { type: [string, "null"], format: uuid }
+        title: { type: string }
+        collectionState: { type: string, enum: [saved, archived] }
+        version: { type: integer }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        skus:
+          type: array
+          items: { $ref: "#/components/schemas/SKU" }
+    SKU:
+      type: object
+      required: [id, productId, displayName, attributes, version, quotes]
+      properties:
+        id: { type: string, format: uuid }
+        productId: { type: string, format: uuid }
+        displayName: { type: string }
+        attributes: { $ref: "#/components/schemas/Attributes" }
+        version: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        quotes:
+          type: array
+          description: Latest quote per SKU in library/list views.
+          items: { $ref: "#/components/schemas/Quote" }
+    Attributes:
+      type: object
+      maxProperties: 40
+      additionalProperties:
+        type: object
+        required: [type, value]
+        properties:
+          type:
+            type: string
+            enum: [number, text, boolean]
+          value:
+            type: [number, string, boolean, "null"]
+          unit:
+            type: string
+            maxLength: 20
+    QuoteInput:
+      type: object
+      properties:
+        priceFen:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 1000000000
+          description: Null means unknown; 0 is a real free price.
+        shippingFen:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 1000000000
+          description: Null means unknown, not free shipping.
+        sourceUrl:
+          type: string
+          format: uri
+          maxLength: 2000
+    Quote:
+      type: object
+      required: [id, skuId, priceFen, shippingFen, priceKind, sourceKind, observedAt, expiresAt]
+      properties:
+        id: { type: string, format: uuid }
+        skuId: { type: string, format: uuid }
+        priceFen: { type: [integer, "null"] }
+        shippingFen: { type: [integer, "null"] }
+        priceKind: { type: string, enum: [exact, unknown] }
+        sourceKind: { type: string, enum: [user_input] }
+        sourceUrl: { type: string }
+        observedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+    Item:
+      type: object
+      required: [id, title, payload, expiresAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
