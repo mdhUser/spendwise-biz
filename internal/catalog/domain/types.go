@@ -88,6 +88,12 @@ type Quote struct {
 	SchemaVersion int
 }
 
+// SKUWithProduct is a read projection used by the run comparator.
+type SKUWithProduct struct {
+	SKU
+	ProductTitle string
+}
+
 // Item is a free-form personal library entry.
 type Item struct {
 	ID        uuid.UUID

@@ -56,6 +56,26 @@ services:
       db:
         condition: service_healthy
 
+  worker:
+    build: .
+    command: ["/app/worker"]
+    environment:
+      BIZ_MYSQL_DSN: biz_app:change-me-app@tcp(db:3306)/spendwise?parseTime=true&loc=UTC
+      BIZ_AUTH_BASE_URL: http://auth:8081
+      BIZ_WORKER_ID: worker-1
+      BIZ_WORKER_POLL: 500ms
+      BIZ_RUN_TIMEOUT: 60s
+      BIZ_PROVIDER_TIMEOUT: 8s
+      BIZ_LLM_TOTAL_TIMEOUT: 12s
+      BIZ_LLM_ATTEMPT_TIMEOUT: 5s
+    healthcheck:
+      disable: true
+    depends_on:
+      biz-migrate:
+        condition: service_completed_successfully
+      auth:
+        condition: service_started
+
   biz:
     build: .
     environment:

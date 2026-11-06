@@ -20,6 +20,7 @@ import (
 	conversationmysql "github.com/mdhuser/spendwise-biz/internal/conversation/store/mysql"
 	"github.com/mdhuser/spendwise-biz/internal/httpserver"
 	"github.com/mdhuser/spendwise-biz/internal/identity"
+	"github.com/mdhuser/spendwise-biz/internal/jobs"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	ledgerhttp "github.com/mdhuser/spendwise-biz/internal/ledger/http"
 	ledgermysql "github.com/mdhuser/spendwise-biz/internal/ledger/store/mysql"
@@ -54,6 +55,7 @@ func main() {
 
 	conversationStore := conversationmysql.New(database)
 	conversationService := conversationapp.New(conversationStore)
+	conversationService.SetQueue(jobs.NewQueue(database, "api"))
 	limiter := ratelimit.New(database)
 	conversationHandler := conversationhttp.New(conversationService, limiter)
 
@@ -93,9 +95,11 @@ func main() {
 		).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		// SSE routes control their own deadlines; a global write timeout would
+		// cut them at the first long poll.
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
+		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
 	stop := make(chan os.Signal, 1)

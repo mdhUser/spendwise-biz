@@ -113,7 +113,16 @@ func (s *Server) Handler() http.Handler {
 	handler = s.accessLog(handler)
 	handler = s.requestID(handler)
 	if s.cfg.RequestTimeout > 0 {
-		handler = http.TimeoutHandler(handler, s.cfg.RequestTimeout, `{"error":{"code":"UNAVAILABLE","message":"请求超时"}}`)
+		// SSE streams are long-lived and must not be wrapped by TimeoutHandler.
+		inner := handler
+		timed := http.TimeoutHandler(inner, s.cfg.RequestTimeout, `{"error":{"code":"UNAVAILABLE","message":"请求超时"}}`)
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/events") {
+				inner.ServeHTTP(w, r)
+				return
+			}
+			timed.ServeHTTP(w, r)
+		})
 	}
 	return handler
 }
@@ -224,6 +233,15 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
 }
+
+// Flush preserves http.Flusher through the access-log wrapper so SSE works.
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 func (s *Server) accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

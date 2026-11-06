@@ -9,8 +9,8 @@ visible in review:
 | `ledger.yaml` | ledger | existing M1 contract |
 | `catalog.yaml` | catalog | M2 — categories, products, SKUs, quotes, library |
 | `conversation.yaml` | conversation | M2 — conversations, messages |
-| `runs.yaml` | conversation/jobs | M3 |
-| `spendwise.yaml` | umbrella (external `$ref`s) | M3 |
+| `runs.yaml` | conversation/jobs | M3 — async runs, cancel, SSE |
+| `spendwise.yaml` | umbrella (external `$ref`s) | M4 |
 
 Auth lives in the separate `spendwise-auth` repository at
 `api/openapi/auth.yaml`.

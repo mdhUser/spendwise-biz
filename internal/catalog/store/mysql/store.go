@@ -368,6 +368,46 @@ func (s *Store) DeleteSKU(ctx context.Context, ownerID string, skuID uuid.UUID) 
 	return nil
 }
 
+// ListRecentSKUsWithProduct returns recent SKUs joined to their product title
+// for auto-candidate selection. It stays inside the catalog module.
+func (s *Store) ListRecentSKUsWithProduct(ctx context.Context, ownerID string, exclude uuid.UUID, limit int) ([]domain.SKUWithProduct, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.owner_id, s.product_id, s.display_name, s.attributes, s.attribute_schema_version,
+		       s.resolution_state, s.version, s.created_at, s.updated_at, p.title
+		FROM catalog_user_skus s
+		JOIN catalog_user_products p ON p.id = s.product_id AND p.owner_id = s.owner_id
+		WHERE s.owner_id = ? AND s.id <> ? AND p.expires_at > UTC_TIMESTAMP(3)
+		ORDER BY s.created_at DESC, s.id DESC LIMIT ?`, ownerID, db.UUIDBytes(exclude), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.SKUWithProduct
+	for rows.Next() {
+		var sku domain.SKU
+		var rawID, rawProduct []byte
+		var attributes []byte
+		var productTitle string
+		if err := rows.Scan(&rawID, &sku.OwnerID, &rawProduct, &sku.DisplayName, &attributes,
+			&sku.SchemaVersion, &sku.ResolutionState, &sku.Version, &sku.CreatedAt, &sku.UpdatedAt, &productTitle); err != nil {
+			return nil, err
+		}
+		parsed, err := db.UUIDFromBytes(rawID)
+		if err != nil {
+			return nil, err
+		}
+		productID, err := db.UUIDFromBytes(rawProduct)
+		if err != nil {
+			return nil, err
+		}
+		sku.ID = parsed
+		sku.ProductID = productID
+		sku.Attributes = attributes
+		out = append(out, domain.SKUWithProduct{SKU: sku, ProductTitle: productTitle})
+	}
+	return out, rows.Err()
+}
+
 // ---- quotes ----
 
 func (s *Store) CreateQuote(ctx context.Context, quote domain.Quote, createKey, requestHash string) error {

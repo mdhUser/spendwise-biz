@@ -44,6 +44,16 @@ type Config struct {
 
 	LogLevel slog.Level
 
+	// Worker / external I/O budgets (target architecture §2.7 and §4.6).
+	RunTimeout        time.Duration
+	ProviderTimeout   time.Duration
+	LLMTotalTimeout   time.Duration
+	LLMAttemptTimeout time.Duration
+	LLMDailyBudgetFen int64
+	WorkerID          string
+	WorkerPoll        time.Duration
+	WorkerHeartbeat   time.Duration
+
 	TrustProxy     bool
 	AllowedOrigins []string
 }
@@ -76,6 +86,7 @@ func Load() (*Config, error) {
 	cfg.LogLevel = parseLevel(env("BIZ_LOG_LEVEL", "info"))
 	cfg.TrustProxy = env("BIZ_TRUST_PROXY", "false") == "true"
 	cfg.AllowedOrigins = splitCSV(os.Getenv("BIZ_ALLOWED_ORIGINS"))
+	cfg.WorkerID = env("BIZ_WORKER_ID", cfg.WorkerID)
 	return cfg, cfg.Validate()
 }
 
@@ -161,12 +172,26 @@ func defaults() *Config {
 		DBMaxOpen:            10,
 		DBMaxIdle:            5,
 		LogLevel:             slog.LevelInfo,
+		RunTimeout:           60 * time.Second,
+		ProviderTimeout:      8 * time.Second,
+		LLMTotalTimeout:      12 * time.Second,
+		LLMAttemptTimeout:    5 * time.Second,
+		LLMDailyBudgetFen:    0,
+		WorkerPoll:           500 * time.Millisecond,
+		WorkerHeartbeat:      30 * time.Second,
 	}
 }
 
 func parseDurations(c *Config) error {
 	c.AuthTimeout = durationEnv("BIZ_AUTH_TIMEOUT", c.AuthTimeout)
 	c.AuthJWKSCacheTTL = durationEnv("BIZ_AUTH_JWKS_CACHE_TTL", c.AuthJWKSCacheTTL)
+	c.RunTimeout = durationEnv("BIZ_RUN_TIMEOUT", c.RunTimeout)
+	c.ProviderTimeout = durationEnv("BIZ_PROVIDER_TIMEOUT", c.ProviderTimeout)
+	c.LLMTotalTimeout = durationEnv("BIZ_LLM_TOTAL_TIMEOUT", c.LLMTotalTimeout)
+	c.LLMAttemptTimeout = durationEnv("BIZ_LLM_ATTEMPT_TIMEOUT", c.LLMAttemptTimeout)
+	c.WorkerPoll = durationEnv("BIZ_WORKER_POLL", c.WorkerPoll)
+	c.WorkerHeartbeat = durationEnv("BIZ_WORKER_HEARTBEAT", c.WorkerHeartbeat)
+	c.LLMDailyBudgetFen = int64Env("BIZ_LLM_DAILY_BUDGET_FEN", c.LLMDailyBudgetFen)
 	c.IdempotencyTTL = durationEnv("BIZ_IDEMPOTENCY_TTL", c.IdempotencyTTL)
 	c.RequestTimeout = durationEnv("BIZ_REQUEST_TIMEOUT", c.RequestTimeout)
 	c.DBTimeout = durationEnv("BIZ_DB_TIMEOUT", c.DBTimeout)
@@ -193,6 +218,18 @@ func durationEnv(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func int64Env(key string, fallback int64) int64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
 }
 
 func intEnv(key string, fallback int) int {

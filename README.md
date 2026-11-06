@@ -1,6 +1,6 @@
 # spendwise-biz
 
-SpendWise 的核心后端业务仓库。已实现 `ledger` 模块（记账、账户/分类、流水、汇总、节省目标实现表），以及 M2 的 `catalog`（用户品类/商品/SKU/人工报价/个人清单）和 `conversation`（会话、消息、限流）模块。
+SpendWise 的核心后端业务仓库。已实现 `ledger`（记账、账户/分类、流水、汇总、节省目标实现表）、`catalog`（用户品类/商品/SKU/人工报价/个人清单）、`conversation`（会话、消息、限流）模块，以及 M3 的异步 `runs` + MySQL `SKIP LOCKED` worker + SSE。
 
 认证由独立仓库 [`spendwise-auth`](../spendwise-auth) 负责。两个服务共用同一个 **MySQL 8.4** 数据库 `spendwise`：
 
@@ -17,7 +17,7 @@ SpendWise 的核心后端业务仓库。已实现 `ledger` 模块（记账、账
 - MySQL 8.4（最低 8.0.30），`database/sql` + `go-sql-driver/mysql`
 - `goose` 嵌入迁移（biz 使用独立的 `goose_db_version`；auth 使用 `schema_migrations`）
 - UUIDv7（资源 ID 使用 `BINARY(16)`）、`log/slog`
-- 模块化单体：`ledger` / `catalog` / `conversation` 业务模块 + `identity` JWT 验签/JWKS 缓存 + `authclient` 旧 token 回退适配器
+- 模块化单体：`ledger` / `catalog` / `conversation` 业务模块 + `identity` JWT 验签/JWKS 缓存 + `authclient` 旧 token 回退适配器 + `jobs` 异步队列/worker
 
 ## 本地启动
 
@@ -127,6 +127,10 @@ curl -s "http://127.0.0.1:8080/v1/ledger/saving-goals/<goal-id>/achievements?fro
 | GET/DELETE | `/v1/conversations/{id}` | 会话详情（含消息）/删除 |
 | DELETE | `/v1/conversations` | 删除全部会话 |
 | GET/POST | `/v1/conversations/{id}/messages` | 消息列表/追加用户消息 |
+| POST | `/v1/runs` | 发起异步平替/推荐（202 + job） |
+| GET | `/v1/runs/{id}` | 运行状态、回复、评估 |
+| POST | `/v1/runs/{id}/cancel` | 取消 run 与排队 job |
+| GET | `/v1/runs/{id}/events` | SSE：snapshot/progress/result |
 
 认证接口（`/v1/auth/*`）全部由 `spendwise-auth` 提供，biz 不再暴露。
 
@@ -139,7 +143,26 @@ curl -s "http://127.0.0.1:8080/v1/ledger/saving-goals/<goal-id>/achievements?fro
 - 幂等重放返回 HTTP 200 + `Idempotent-Replay: true`；同 key 不同请求返回 `409 IDEMPOTENCY_MISMATCH`。
 - 认证服务不可用时返回 `503 AUTH_UNAVAILABLE`，客户端应稍后重试而不是重新登录。
 
-完整契约见 `api/openapi/ledger.yaml`；认证契约见 `../spendwise-auth/api/openapi/auth.yaml`。
+完整契约见 `api/openapi/ledger.yaml`、`catalog.yaml`、`conversation.yaml`、`runs.yaml`；认证契约见 `../spendwise-auth/api/openapi/auth.yaml`。
+
+### M3 异步 run 验证
+
+```bash
+# 202 Accepted，返回 runId/jobId；worker 在后台领取 async_jobs
+curl -i -X POST http://127.0.0.1:8080/v1/runs \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-run-0001' \
+  -d '{"conversationId":"<id>","message":"比较这两个规格","sourceSkuId":"<sku>","candidateSkuIds":["<sku2>"]}'
+
+# 轮询状态
+curl -s http://127.0.0.1:8080/v1/runs/<run-id> -H "Authorization: Bearer $TOKEN"
+
+# SSE（curl -N 关闭缓冲）；已完成 run 会先发 snapshot 再发 result
+curl -N http://127.0.0.1:8080/v1/runs/<run-id>/events -H "Authorization: Bearer $TOKEN"
+```
+
+worker 领取使用 `SELECT ... FOR UPDATE SKIP LOCKED`，30s 心跳、5s/30s/2m 退避、3 次后 failed；SIGTERM 后停止领取并释放当前锁回队列。SSE 心跳 15s，`retry: 3000`，客户端断开不会取消 run。
 
 ### M0 认证验证
 
@@ -165,13 +188,18 @@ curl -i -X POST http://127.0.0.1:8081/v1/auth/refresh \
 
 ```text
 cmd/api        HTTP 服务
-cmd/migrate    goose 迁移（仅 ledger）
+cmd/migrate    goose 迁移（core 流：ledger/catalog/conversation/platform）
+cmd/worker     异步任务执行器
 cmd/admin      清理过期幂等记录
 internal/identity   JWT 本地验签、JWKS 5m 缓存 + ETag、静态公钥兜底
 internal/authclient 旧 opaque token 回退（GET /v1/auth/me）
 internal/ledger     记账/目标/实现表
 internal/catalog    用户品类/商品/SKU/报价/清单
 internal/conversation 会话/消息（M3 在其上增加 run 与 SSE）
+internal/jobs      MySQL SKIP LOCKED 队列、worker、run.substitution handler
+internal/provider  平台适配骨架（固定地址、超时、fixture）
+internal/llm       LLM router 骨架（主备、总超时/单次超时、规则兜底）
+cmd/worker         异步执行器（领取/心跳/重试/优雅停止）
 internal/platform/ratelimit MySQL 固定窗口限流（多副本共享）
 internal/httpserver 路由装配、JWT-first 鉴权、/readyz、默认数据、日志、恢复
 internal/platform   config/db/httpx/apperr/id/migrate/ratelimit
@@ -186,7 +214,8 @@ migrations/platform     rate_buckets / async_jobs
 
 ## 当前限制
 
-- M2 已迁入 catalog/conversation 的核心 CRUD 与限流；异步 run、worker、SSE、provider/LLM 在 M3 迁入。
+- M3 已提供异步 run + worker + SSE；provider/LLM 目前是 fixture/规则骨架，真实密钥与平台联调需在部署环境配置。
+- 旧 Next.js 同步 45 秒链路仍保留作为回滚路径（`run.mode=sync` 尚未接线），但新路径不再依赖它。
 - M1 已固化模块边界与表所有权，见 [`docs/data-ownership.md`](docs/data-ownership.md)。
 - `catalog_products`/`catalog_offers` 为公共目录预留，M2 不暴露写接口；匿名用户数据默认不迁移。
 - 商品/SKU 删除为硬删除（同模块级联），与旧 Prisma 行为一致；会话 30 天过期。

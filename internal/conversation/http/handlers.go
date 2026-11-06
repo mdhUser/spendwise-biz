@@ -30,6 +30,10 @@ func (h *Handler) Register(mux *http.ServeMux, auth func(http.Handler) http.Hand
 	mux.Handle("DELETE /v1/conversations/{id}", auth(http.HandlerFunc(h.delete)))
 	mux.Handle("GET /v1/conversations/{id}/messages", auth(http.HandlerFunc(h.listMessages)))
 	mux.Handle("POST /v1/conversations/{id}/messages", auth(http.HandlerFunc(h.createMessage)))
+	mux.Handle("POST /v1/runs", auth(http.HandlerFunc(h.createRun)))
+	mux.Handle("GET /v1/runs/{id}", auth(http.HandlerFunc(h.getRun)))
+	mux.Handle("POST /v1/runs/{id}/cancel", auth(http.HandlerFunc(h.cancelRun)))
+	mux.Handle("GET /v1/runs/{id}/events", auth(http.HandlerFunc(h.runEvents)))
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {

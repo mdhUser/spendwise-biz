@@ -24,6 +24,8 @@ import (
 	conversationhttp "github.com/mdhuser/spendwise-biz/internal/conversation/http"
 	conversationmysql "github.com/mdhuser/spendwise-biz/internal/conversation/store/mysql"
 	"github.com/mdhuser/spendwise-biz/internal/httpserver"
+	"github.com/mdhuser/spendwise-biz/internal/jobs"
+	"github.com/mdhuser/spendwise-biz/internal/jobs/handlers"
 	ledgerapp "github.com/mdhuser/spendwise-biz/internal/ledger/app"
 	ledgerhttp "github.com/mdhuser/spendwise-biz/internal/ledger/http"
 	ledgermysql "github.com/mdhuser/spendwise-biz/internal/ledger/store/mysql"
@@ -680,5 +682,212 @@ func cleanupTestData(t *testing.T, database *sql.DB, ownerIDs []string) {
 				t.Errorf("cleanup %q for owner %s: %v", step.query, ownerID, err)
 			}
 		}
+	}
+}
+
+// TestRunWorkerMySQLIntegration proves the M3 path: POST /runs returns 202,
+// the worker claims the MySQL job, computes a comparison from catalog quotes,
+// writes assessments plus an assistant message, and SSE replays snapshot+result.
+func TestRunWorkerMySQLIntegration(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("BIZ_TEST_MYSQL_DSN"))
+	if dsn == "" {
+		t.Skip("BIZ_TEST_MYSQL_DSN is not set; skipping MySQL integration test")
+	}
+	parsed, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(parsed.DBName), "test") {
+		t.Fatalf("refusing database %q: name must contain test", parsed.DBName)
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	userA := "run-user-a-" + suffix
+	userB := "run-user-b-" + suffix
+	tokens := map[string]string{"token-a": userA, "token-b": userB}
+	fakeAuth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := tokens[strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))]
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"user": map[string]any{"id": userID, "status": "active"}})
+	}))
+	t.Cleanup(fakeAuth.Close)
+	t.Setenv("BIZ_MYSQL_DSN", dsn)
+	t.Setenv("BIZ_MIGRATION_DSN", dsn)
+	t.Setenv("BIZ_AUTH_BASE_URL", fakeAuth.URL)
+	t.Setenv("BIZ_AUTH_TIMEOUT", "2s")
+	t.Setenv("BIZ_HTTP_ADDR", "127.0.0.1:0")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	database, err := db.Open(cfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := migrate.Apply(context.Background(), database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupM2Data(t, database, []string{userA, userB})
+		_, _ = database.Exec(`DELETE FROM async_jobs WHERE owner_id IN (?, ?)`, userA, userB)
+	})
+
+	ledgerStore := ledgermysql.New(database)
+	ledgerService := ledgerapp.New(database, ledgerStore, cfg)
+	ledgerHandler := ledgerhttp.New(ledgerService, cfg.Location())
+	catalogService := catalogapp.New(catalogmysql.New(database))
+	conversationService := conversationapp.New(conversationmysql.New(database))
+	queue := jobs.NewQueue(database, "run-test-worker")
+	conversationService.SetQueue(queue)
+	worker := jobs.NewWorker(queue, (&handlers.RunSubstitution{Conversations: conversationService, Catalog: catalogService, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handle, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server := httptest.NewServer(httpserver.New(
+		database, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ledgerService, ledgerHandler, authclient.New(cfg.AuthBaseURL, cfg.AuthTimeout), nil,
+		httpserver.Config{RequestTimeout: cfg.RequestTimeout, Timezone: cfg.Location()},
+		cataloghttp.New(catalogService), conversationhttp.New(conversationService, ratelimit.New(database)),
+	).Handler())
+	t.Cleanup(server.Close)
+	client := server.Client()
+	client.Timeout = 20 * time.Second
+
+	// Fixture catalog: source 10.00 + 2.00 shipping; candidate 8.00 + 1.00.
+	status, _, body := doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/categories", "token-a", "run-cat-"+suffix, map[string]any{"name": "垃圾袋"})
+	requireStatus(t, status, http.StatusCreated, body)
+	var category idResponse
+	decodeJSON(t, body, &category)
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/products", "token-a", "run-prod-"+suffix, map[string]any{"title": "垃圾袋", "categoryId": category.ID})
+	requireStatus(t, status, http.StatusCreated, body)
+	var product idResponse
+	decodeJSON(t, body, &product)
+	makeSKU := func(key string, name string, priceFen int64, shippingFen int64) string {
+		status, _, body := doJSON(t, client, http.MethodPost, server.URL+"/v1/catalog/products/"+product.ID+"/skus", "token-a", key, map[string]any{
+			"displayName": name, "attributes": map[string]any{}, "quote": map[string]any{"priceFen": priceFen, "shippingFen": shippingFen},
+		})
+		requireStatus(t, status, http.StatusCreated, body)
+		var sku idResponse
+		decodeJSON(t, body, &sku)
+		return sku.ID
+	}
+	sourceSKU := makeSKU("run-sku-source-"+suffix, "500只", 1000, 200)
+	candidateSKU := makeSKU("run-sku-candidate-"+suffix, "1000只", 800, 100)
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/conversations", "token-a", "run-conv-"+suffix, map[string]any{"title": "比较"})
+	requireStatus(t, status, http.StatusCreated, body)
+	var conversation idResponse
+	decodeJSON(t, body, &conversation)
+
+	runPayload := map[string]any{
+		"conversationId": conversation.ID, "message": "比较这两个规格",
+		"sourceSkuId": sourceSKU, "candidateSkuIds": []string{candidateSKU},
+	}
+	status, headers, body := doJSON(t, client, http.MethodPost, server.URL+"/v1/runs", "token-a", "run-key-"+suffix, runPayload)
+	requireStatus(t, status, http.StatusAccepted, body)
+	if headers.Get("Location") == "" {
+		t.Fatal("Location header missing on 202")
+	}
+	var created struct {
+		ID     string `json:"id"`
+		JobID  string `json:"jobId"`
+		Status string `json:"status"`
+	}
+	decodeJSON(t, body, &created)
+	if created.ID == "" || created.JobID == "" || created.Status != "queued" {
+		t.Fatalf("created run = %+v", created)
+	}
+	status, headers, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/runs", "token-a", "run-key-"+suffix, runPayload)
+	requireStatus(t, status, http.StatusOK, body)
+	if headers.Get("Idempotent-Replay") != "true" {
+		t.Fatal("run replay header missing")
+	}
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/runs", "token-a", "run-key-"+suffix, map[string]any{
+		"conversationId": conversation.ID, "message": "不同请求", "sourceSkuId": sourceSKU, "candidateSkuIds": []string{candidateSKU},
+	})
+	requireStatus(t, status, http.StatusConflict, body)
+
+	if ok, err := worker.RunOnce(context.Background()); !ok || err != nil {
+		t.Fatalf("worker RunOnce = %v, %v", ok, err)
+	}
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/runs/"+created.ID, "token-a", "", nil)
+	requireStatus(t, status, http.StatusOK, body)
+	var run struct {
+		Status      string `json:"status"`
+		Reply       string `json:"reply"`
+		Assessments []struct {
+			Verdict       string          `json:"verdict"`
+			CostBreakdown json.RawMessage `json:"costBreakdown"`
+		} `json:"assessments"`
+	}
+	decodeJSON(t, body, &run)
+	if run.Status != "succeeded" || len(run.Assessments) != 1 || run.Assessments[0].Verdict != "alternative" {
+		t.Fatalf("run = %+v", run)
+	}
+	if !strings.Contains(run.Reply, "9.00") || !strings.Contains(run.Reply, "未知") {
+		t.Fatalf("reply = %q", run.Reply)
+	}
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/conversations/"+conversation.ID, "token-a", "", nil)
+	requireStatus(t, status, http.StatusOK, body)
+	var detail struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	decodeJSON(t, body, &detail)
+	if len(detail.Messages) != 2 || detail.Messages[1].Role != "assistant" {
+		t.Fatalf("messages = %+v", detail.Messages)
+	}
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/runs/"+created.ID, "token-b", "", nil)
+	requireStatus(t, status, http.StatusNotFound, body)
+
+	// SSE after completion: snapshot + result, then the stream closes.
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/v1/runs/"+created.ID+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer token-a")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("SSE request: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	stream := string(raw)
+	if !strings.Contains(stream, "event: snapshot") || !strings.Contains(stream, "event: result") {
+		t.Fatalf("SSE stream = %q", stream)
+	}
+
+	// Cancellation: create another run, cancel it, and ensure the worker does
+	// not overwrite the terminal state.
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/runs", "token-a", "run-cancel-"+suffix, runPayload)
+	requireStatus(t, status, http.StatusAccepted, body)
+	var cancelRun struct {
+		ID string `json:"id"`
+	}
+	decodeJSON(t, body, &cancelRun)
+	status, _, body = doJSON(t, client, http.MethodPost, server.URL+"/v1/runs/"+cancelRun.ID+"/cancel", "token-a", "", nil)
+	requireStatus(t, status, http.StatusOK, body)
+	var cancelled struct {
+		Status string `json:"status"`
+	}
+	decodeJSON(t, body, &cancelled)
+	if cancelled.Status != "cancelled" {
+		t.Fatalf("cancel status = %q", cancelled.Status)
+	}
+	if ok, err := worker.RunOnce(context.Background()); ok || err != nil {
+		t.Fatalf("cancel worker RunOnce = %v, %v; job should already be cancelled", ok, err)
+	}
+	var jobStatus string
+	if err := database.QueryRow(`SELECT status FROM async_jobs WHERE owner_id = ? AND run_id = UNHEX(REPLACE(?, '-', ''))`, userA, cancelRun.ID).Scan(&jobStatus); err != nil {
+		t.Fatalf("read cancelled job: %v", err)
+	}
+	if jobStatus != "cancelled" {
+		t.Fatalf("job status = %q, want cancelled", jobStatus)
+	}
+	status, _, body = doJSON(t, client, http.MethodGet, server.URL+"/v1/runs/"+cancelRun.ID, "token-a", "", nil)
+	requireStatus(t, status, http.StatusOK, body)
+	decodeJSON(t, body, &cancelled)
+	if cancelled.Status != "cancelled" {
+		t.Fatalf("run after worker = %q, want cancelled", cancelled.Status)
 	}
 }

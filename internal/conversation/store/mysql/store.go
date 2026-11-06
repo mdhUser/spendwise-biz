@@ -15,6 +15,12 @@ type Store struct{ db *sql.DB }
 
 func New(database *sql.DB) *Store { return &Store{db: database} }
 
+// WithTx runs fn in a short transaction; the app layer uses it to compose
+// module writes (message + run + job) without exposing sql.DB.
+func (s *Store) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	return db.WithTx(ctx, s.db, nil, fn)
+}
+
 func (s *Store) ListConversations(ctx context.Context, ownerID string, cursorTime *time.Time, cursorID *uuid.UUID, limit int) ([]domain.Conversation, error) {
 	query := `SELECT id, owner_id, title, needs, asks, version, expires_at, created_at, updated_at
 	          FROM conv_conversations
@@ -132,22 +138,10 @@ func (s *Store) CreateMessage(ctx context.Context, ownerID string, message domai
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO conv_messages (id, conversation_id, role, content, create_key, request_hash, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			db.UUIDBytes(message.ID), db.UUIDBytes(message.ConversationID), message.Role,
-			message.Content, nullableString(createKey), nullableString(requestHash), message.CreatedAt); err != nil {
+		if err := insertMessageTx(ctx, tx, message, createKey, requestHash); err != nil {
 			return err
 		}
-		increment := 0
-		if message.Role == "user" {
-			increment = 1
-		}
-		_, err = tx.ExecContext(ctx, `
-			UPDATE conv_conversations
-			SET asks = asks + ?, version = version + 1, updated_at = ?
-			WHERE id = ? AND owner_id = ?`, increment, now, db.UUIDBytes(message.ConversationID), ownerID)
-		return err
+		return touchConversationTx(ctx, tx, ownerID, message.ConversationID, message.Role, now)
 	})
 }
 
@@ -216,4 +210,25 @@ func nullableString(value string) any {
 		return nil
 	}
 	return value
+}
+
+func insertMessageTx(ctx context.Context, tx *sql.Tx, message domain.Message, createKey, requestHash string) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO conv_messages (id, conversation_id, role, content, create_key, request_hash, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		db.UUIDBytes(message.ID), db.UUIDBytes(message.ConversationID), message.Role,
+		message.Content, nullableString(createKey), nullableString(requestHash), message.CreatedAt)
+	return err
+}
+
+func touchConversationTx(ctx context.Context, tx *sql.Tx, ownerID string, conversationID uuid.UUID, role string, now time.Time) error {
+	increment := 0
+	if role == "user" {
+		increment = 1
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE conv_conversations
+		SET asks = asks + ?, version = version + 1, updated_at = ?
+		WHERE id = ? AND owner_id = ?`, increment, now, db.UUIDBytes(conversationID), ownerID)
+	return err
 }

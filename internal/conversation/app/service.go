@@ -21,6 +21,7 @@ import (
 
 type Service struct {
 	store *conversationstore.Store
+	queue RunEnqueuer
 	now   func() time.Time
 }
 
