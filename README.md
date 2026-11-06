@@ -215,6 +215,7 @@ migrations/platform     rate_buckets / async_jobs
 ## 当前限制
 
 - M3 已提供异步 run + worker + SSE；provider/LLM 目前是 fixture/规则骨架，真实密钥与平台联调需在部署环境配置。
+- M4 提供 `cmd/import-pg` 骨架：只导入可重建的公共目录 `products`/`offers`，匿名用户/会话/消息不迁移（ADR）。
 - 旧 Next.js 同步 45 秒链路仍保留作为回滚路径（`run.mode=sync` 尚未接线），但新路径不再依赖它。
 - M1 已固化模块边界与表所有权，见 [`docs/data-ownership.md`](docs/data-ownership.md)。
 - `catalog_products`/`catalog_offers` 为公共目录预留，M2 不暴露写接口；匿名用户数据默认不迁移。
@@ -254,3 +255,24 @@ go run ./cmd/admin cleanup
 - 生产 MySQL 中 auth 与 biz 共用 `spendwise` 数据库，但使用不同账号；auth 表由 auth 迁移独占，biz 不建 `users` / `sessions` / `invites`，也不加跨服务外键。
 - Go 服务不要直接暴露公网；由 Next.js BFF 代理并持有 HttpOnly Cookie。
 - 生产 MySQL 需开启备份/binlog，并单独演练恢复；现有 PostgreSQL 备份不覆盖本服务。
+
+## M4 PostgreSQL → MySQL 导入（骨架）
+
+```bash
+export IMPORT_PG_DSN='postgresql://postgres:postgres@127.0.0.1:5432/spendwise'
+export BIZ_MYSQL_DSN='biz_app:change-me-app@tcp(127.0.0.1:3307)/spendwise?parseTime=true&loc=UTC'
+
+# 默认 dry-run：只统计源/目标行数，不写库
+go run ./cmd/import-pg -dry-run -tables products,offers
+
+# 实际导入：按批事务、UUIDv5 确定性 ID、import_id_map 幂等
+go run ./cmd/import-pg -dry-run=false -batch 1000 -tables products,offers
+```
+
+规则：
+
+- 只迁移可重建的公共目录（`products` → `catalog_products`、`offers` → `catalog_offers`）。
+- 匿名 `users`、`conversations`、`messages`、`user_items`、`snapshots` **不迁移**（30 天过期、目标架构 §6.2.1）。
+- 源 ID 通过 UUIDv5 映射为 `BINARY(16)`，写入 `import_id_map`；重复执行幂等。
+- 导入后校验源行数与映射行数一致，不一致直接失败。
+- 正式切换仍按目标架构 M4：staging 演练 → 只读窗口 → 增量 → 校验 → 切连接。

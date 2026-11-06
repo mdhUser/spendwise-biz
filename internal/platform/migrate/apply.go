@@ -19,9 +19,11 @@ import (
 // runs across processes/instances.
 const LockName = "spendwise_biz_migrations"
 
-// Modules lists migration directories in dependency order. Biz only owns the
-// ledger module; auth tables are created and owned by spendwise-auth.
-var Modules = []string{"ledger"}
+// Modules lists migration directories in dependency order. All directories
+// share the core goose_db_version flow, so version numbers must be globally
+// increasing across modules. Auth tables are created and owned by
+// spendwise-auth and are never touched here.
+var Modules = []string{"ledger", "catalog", "conversation", "platform"}
 
 // Apply runs every pending goose migration up to the latest version.
 //

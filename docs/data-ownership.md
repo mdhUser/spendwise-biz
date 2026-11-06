@@ -74,6 +74,7 @@
 | `async_jobs` | `SKIP LOCKED` 任务队列：run、cleanup、export、delete |
 | `feature_flags` | 按域切流开关（M3 预留） |
 | `deletion_requests` | 注销请求与冷静期（M3/M4 预留） |
+| `import_id_map` | PostgreSQL → MySQL 源 ID → UUIDv5 目标 ID 映射（M4） |
 
 迁移目录：`migrations/platform/`。
 
