@@ -1,7 +1,7 @@
 # SpendWise 数据所有权（M1）
 
 本文件是 `spendwise-biz`（演进为 `spendwise-api`）的表所有权登记处，也是
-`spendwise-target-architecture.md` §6.2 的落地清单。新增表必须先登记在这里，
+`../spendwise/docs/TARGET-ARCHITECTURE.md` §6.2 的落地清单。新增表必须先登记在这里，
 再写迁移；CI/评审发现越界（例如 core 迁移改 `users`）应直接拒绝。
 
 ## 1. 数据库与账号
