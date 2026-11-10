@@ -9,7 +9,7 @@ SpendWise 的核心后端业务仓库。已实现 `ledger`（记账、账户/分
 - biz 不读取 auth 的 `users` / `sessions` 表。M0 起优先本地验签 Ed25519 JWT：启动时加载 `BIZ_AUTH_JWKS_URL`，进程内缓存 5 分钟并用 ETag 条件请求刷新；只有本地验签失败时才回退 `GET {BIZ_AUTH_BASE_URL}/v1/auth/me`（兼容期）。JWT 路径每请求零 auth RTT；响应头 `X-Auth-Method: jwt|opaque` 可用于确认命中路径。
 - `/readyz` 同时检查 MySQL、迁移版本和 JWKS 是否已加载。启动时 JWKS 拉取失败会保持 503，直到成功或配置了 `BIZ_AUTH_JWKS_STATIC_PUBLIC_KEY` 兜底公钥。
 
-现有 Next.js/Prisma 应用仍在另一个仓库，继续使用 PostgreSQL；它与本服务只通过 HTTP/OpenAPI 协作。
+现有 Next.js/Prisma 兼容层在另一个仓库，已切到同一个 MySQL `spendwise` 数据库，使用 `web_*` 表并通过 `spendwise-auth` 登录；它仍通过 HTTP 调用 auth/biz，尚未完成所有业务页面到 Go API 的切换。PostgreSQL 只作为历史数据迁移源保留。
 
 ## 技术栈
 
