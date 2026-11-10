@@ -256,7 +256,9 @@ go run ./cmd/admin cleanup
 - Go 服务不要直接暴露公网；由 Next.js BFF 代理并持有 HttpOnly Cookie。
 - 生产 MySQL 需开启备份/binlog，并单独演练恢复；现有 PostgreSQL 备份不覆盖本服务。
 
-## M4 PostgreSQL → MySQL 导入（骨架）
+## M4 历史 PostgreSQL → MySQL 导入工具
+
+`cmd/import-pg` 是一次性离线迁移工具，不属于 `api`、`migrate` 或 `worker` 的运行链路，也不会被 Docker 镜像构建。auth、biz API、biz migration 和 worker 的唯一数据源都是 MySQL `spendwise`。不要把 `IMPORT_PG_DSN` 写入服务运行时 `.env`，只在执行历史导入时临时 export。
 
 ```bash
 export IMPORT_PG_DSN='postgresql://postgres:postgres@127.0.0.1:5432/spendwise'
